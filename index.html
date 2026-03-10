@@ -145,6 +145,16 @@ function syncScreen(){
     return;
   }
   if(state.finished){ showScreen('winner'); return; }
+
+  // Countdown phase — show countdown screen to everyone
+  if(state.phase==='countdown'){
+    // Only admin runs the timer; others just see the screen
+    if(!document.getElementById('screen-countdown').classList.contains('hidden')) return; // already showing
+    const parts=(state.countdownFirst||'? נגד ?').split(' נגד ');
+    _runCountdownUI(parts[0]||'?', parts[1]||'?');
+    return;
+  }
+
   if(state.started){
     showScreen('vote');
     if(isAdmin && !state.finished && !state.paused){
@@ -165,23 +175,28 @@ function startAdminClock(){
     if(!state?.started||state?.finished||state?.paused) return;
     const now=Date.now();
     if(!state.phaseEndsAt||now<state.phaseEndsAt) return;
-    clearInterval(adminClockId);
+    clearInterval(adminClockId); // stop before writing
     if(state.phase==='match'){
-      await update(ref(db,'tournament'),{phase:'vote',timerStart:Date.now(),phaseEndsAt:Date.now()+VOTE_TIME*1000});
+      await update(ref(db,'tournament'),{
+        phase:'vote',timerStart:Date.now(),
+        phaseEndsAt:Date.now()+VOTE_TIME*1000
+      });
+      // onValue will call startAdminClock again
     } else if(state.phase==='vote'){
       const nextIdx=(state.currentPairIdx||0)+1;
       if(nextIdx>=(state.pairs||[]).length){
         await update(ref(db,'tournament'),{finished:true,phase:'done'});
       } else {
         await update(ref(db,'tournament'),{
-          phase:'match', currentPairIdx:nextIdx,
-          timerStart:Date.now(), phaseEndsAt:Date.now()+MATCH_TIME*1000,
-          [`donePairs/${state.currentPairIdx||0}`]:true
+          phase:'match',currentPairIdx:nextIdx,
+          timerStart:Date.now(),phaseEndsAt:Date.now()+MATCH_TIME*1000,
+          [`donePairs/${state.currentPairIdx||0}`]:true,
+          paused:false
         });
+        // onValue will call startAdminClock again
       }
-      setTimeout(startAdminClock,600);
     }
-  },400);
+  },300);
 }
 
 // ── SHOW SCREEN ───────────────────────────────────────
@@ -428,7 +443,8 @@ function renderAdmin(){
     <div class="card">
       <div class="info-row">
         <button class="btn btn-green" onclick="showCountdown()">▶️ התחל</button>
-        <button class="btn btn-red" onclick="resetTournament()">🔄 איפוס מלא</button>
+        <button class="btn btn-red" onclick="resetTournament()">🔄 איפוס תחרות</button>
+        <button class="btn" style="background:linear-gradient(135deg,#6c0000,#a00);color:#fff;margin-top:6px;border:2px solid #ff4444" onclick="fullReset()">🗑️ איפוס מלא (שחקנים + תחרות)</button>
       </div>
       <div class="info-row" style="margin-top:8px">
         <button class="btn ${paused?'btn-green':'btn-orange'}" onclick="togglePause()">${paused?'▶️ המשך':'⏸️ עצור הכל'}</button>
@@ -503,9 +519,19 @@ window.jumpToPair=async function(i){
   startAdminClock();
 };
 window.resetTournament=async function(){
-  if(!confirm('לאפס את כל התחרות? כולם יחזרו למסך ההמתנה.')) return;
-  clearInterval(adminClockId); clearInterval(localTick);
+  if(!confirm('לאפס את התחרות? כולם יחזרו למסך ההמתנה.')) return;
+  clearInterval(adminClockId); clearInterval(localTick); clearInterval(window._countdownTick);
   await remove(ref(db,'tournament'));
+};
+
+window.fullReset=async function(){
+  if(!confirm('⚠️ איפוס מלא — למחוק את כל התחרות וכל השחקנים ולהתחיל מאפס?')) return;
+  if(!confirm('בטוח לגמרי? פעולה זו לא ניתנת לביטול!')) return;
+  clearInterval(adminClockId); clearInterval(localTick); clearInterval(window._countdownTick);
+  await remove(ref(db,'tournament'));
+  await remove(ref(db,'playerNames'));
+  isAdmin=false;
+  location.reload();
 };
 
 // ── NAV FOR ALL USERS (prev/next match) ───────────────
@@ -593,30 +619,46 @@ window.confirmDraft=async function(){
 };
 
 function showCountdown(){
-  // Hide all screens
+  if(!state?.pairs||state.pairs.length===0){alert('קודם כל בצע הגרלה!');return;}
+  const names=state?.orderedNames||playerNames;
+  const firstPair=(state.pairs||[])[0];
+  const p1=names[firstPair?.p1]||'?';
+  const p2=names[firstPair?.p2]||'?';
+  // Write to Firebase so ALL phones show countdown
+  update(ref(db,'tournament'),{phase:'countdown',countdownFirst:p1+' נגד '+p2});
+  _runCountdownUI(p1,p2);
+}
+
+function _runCountdownUI(p1,p2){
+  clearInterval(window._countdownTick);
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
-  const el=document.getElementById('screen-countdown');
-  el.classList.remove('hidden');
+  document.getElementById('screen-countdown').classList.remove('hidden');
+  const fm=document.getElementById('countdown-first-match');
+  if(fm) fm.textContent=p1+' VS '+p2;
   let t=10;
   const numEl=document.getElementById('countdown-num');
   const ringEl=document.getElementById('countdown-circle');
-  numEl.textContent=t;
+  numEl.textContent=t; numEl.style.color='#fff';
   if(ringEl) ringEl.style.strokeDashoffset=0;
-
-  // Beep on start
-  beep(600,0.15,0.4,'sine');
-
-  const tick=setInterval(()=>{
+  try{beep(600,0.15,0.4,'sine');}catch(e){}
+  window._countdownTick=setInterval(()=>{
     t--;
-    numEl.textContent=t>0?t:'🥋';
-    if(ringEl) ringEl.style.strokeDashoffset=264*(1-t/10);
     if(t>0){
-      // urgency beeps
-      beep(t<=3?880:500, 0.1, 0.3);
+      numEl.textContent=t;
+      numEl.style.color=t<=3?'#e74c3c':'#fff';
+      if(ringEl) ringEl.style.strokeDashoffset=264*(1-t/10);
+      try{beep(t<=3?880:500,0.1,0.3);}catch(e){}
     } else {
-      clearInterval(tick);
-      // Start tournament!
-      startTournament();
+      numEl.textContent='🥋';
+      if(ringEl) ringEl.style.strokeDashoffset=264;
+      clearInterval(window._countdownTick);
+      // Start tournament for real
+      update(ref(db,'tournament'),{
+        started:true,phase:'match',currentPairIdx:0,
+        timerStart:Date.now(),phaseEndsAt:Date.now()+MATCH_TIME*1000,
+        paused:false,finished:false,countdownFirst:null
+      });
+      if(isAdmin) startAdminClock();
     }
   },1000);
 }
@@ -959,8 +1001,9 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 <!-- COUNTDOWN -->
 <div id="screen-countdown" class="screen hidden">
   <div class="waiting-box" style="padding:40px 20px">
-    <div style="font-size:1.1rem;color:#f0e68c;font-weight:700;letter-spacing:2px;margin-bottom:24px">🥋 התחרות מתחילה!</div>
-    <div style="position:relative;width:160px;height:160px;margin:0 auto 16px">
+    <div style="font-size:1.2rem;color:#f0e68c;font-weight:900;letter-spacing:1px;margin-bottom:4px">⏳ עוד רגע מתחילים</div>
+    <div style="font-size:0.9rem;color:#aaa;margin-bottom:20px">התכוננו!</div>
+    <div style="position:relative;width:160px;height:160px;margin:0 auto 20px">
       <svg width="160" height="160" viewBox="0 0 100 100" style="transform:rotate(-90deg)">
         <circle cx="50" cy="50" r="42" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="10"/>
         <circle id="countdown-circle" cx="50" cy="50" r="42" fill="none" stroke="#f0e68c" stroke-width="10"
@@ -969,7 +1012,10 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
       </svg>
       <div id="countdown-num" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:4.5rem;font-weight:900;color:#fff;line-height:1">10</div>
     </div>
-    <div style="color:#aaa;font-size:0.9rem">הכינו את עצמכם...</div>
+    <div style="background:rgba(240,230,140,0.1);border:2px solid rgba(240,230,140,0.4);border-radius:14px;padding:14px 20px;margin-top:4px">
+      <div style="font-size:0.72rem;color:#f0e68c;font-weight:700;letter-spacing:2px;margin-bottom:8px">🥋 המשחק הראשון</div>
+      <div id="countdown-first-match" style="font-size:1.4rem;font-weight:900;color:#fff"></div>
+    </div>
   </div>
 </div>
 
