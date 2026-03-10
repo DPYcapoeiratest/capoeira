@@ -149,6 +149,11 @@ function syncScreen(){
   if(!fbLoaded) return;
   clearTimeout(loadingFallback);
   document.getElementById('screen-loading')?.classList.add('hidden');
+
+  // Don't interrupt the login screen — user is typing their password
+  const loginScreen = document.getElementById('screen-login');
+  if(loginScreen && !loginScreen.classList.contains('hidden')) return;
+
   if(!state){
     if(isAdmin) showScreen('draft');
     else showScreen('waiting');
