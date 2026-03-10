@@ -6,7 +6,7 @@
 <title>תחרות קפוארה 🥋</title>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
-import { getDatabase, ref, set, get, onValue, update, remove } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-database.js";
+import { getDatabase, ref, set, onValue, update, remove } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-database.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyD6fVmMOM6aUxHz4FeaVtyUsxIWQo9yDWI",
@@ -22,6 +22,9 @@ const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
 const ADMIN_PASS = "1234";
+const MATCH_TIME = 40;
+const VOTE_TIME = 10;
+
 const DEFAULT_PLAYERS = [
   "קואוצ' מקסוס","ספירוש אלגריוש","פנוש דניאלוש","ז'וגוש בולשוס",
   "ז'וגיוס סאן","סגיבוש מרויליוש","חנוש","עדן קורוז'יו"
@@ -29,41 +32,43 @@ const DEFAULT_PLAYERS = [
 
 function generatePairs(n) {
   const players = Array.from({length:n},(_,i)=>i);
-  const rounds = [];
   const p = [...players];
   if (p.length % 2 !== 0) p.push(-1);
   const half = p.length / 2;
+  const rounds = [];
   for (let r = 0; r < p.length - 1; r++) {
     const round = [];
-    for (let i = 0; i < half; i++) {
+    for (let i = 0; i < half; i++)
       if (p[i] !== -1 && p[p.length-1-i] !== -1)
-        round.push({p1: p[i], p2: p[p.length-1-i]});
-    }
+        round.push({p1:p[i], p2:p[p.length-1-i]});
     rounds.push(round);
     const last = p.pop();
-    p.splice(1, 0, last);
+    p.splice(1,0,last);
   }
-  return rounds.flatMap(r => r);
+  return rounds.flatMap(r=>r);
 }
 
 let state = null;
 let currentScreen = 'loading';
 let selectedStars = 0;
-let timerInterval = null;
+let localTimer = null;
 let isAdmin = false;
-let editingIdx = null;
 let playerNames = [...DEFAULT_PLAYERS];
 let orderSelection = [];
 
 const voterId = (() => {
   let id = localStorage.getItem('cap_vid');
-  if (!id) { id = 'v_'+Math.random().toString(36).substr(2,9); localStorage.setItem('cap_vid',id); }
+  if (!id) { id='v_'+Math.random().toString(36).substr(2,9); localStorage.setItem('cap_vid',id); }
   return id;
 })();
 
+// ── FIREBASE ─────────────────────────────────────────
 onValue(ref(db,'tournament'), snap => {
   state = snap.val();
   refreshUI();
+  if (isAdmin && state?.phase === 'match' && state?.timerStart) {
+    runAdminClock();
+  }
 });
 
 onValue(ref(db,'playerNames'), snap => {
@@ -72,15 +77,48 @@ onValue(ref(db,'playerNames'), snap => {
   if (currentScreen==='draft') renderDraft();
 });
 
+// ── ADMIN CLOCK (only one device drives time) ────────
+let clockRunning = false;
+function runAdminClock() {
+  if (clockRunning || !isAdmin) return;
+  clockRunning = true;
+  const tick = setInterval(async () => {
+    if (!state) { clearInterval(tick); clockRunning=false; return; }
+    const now = Date.now();
+    const elapsed = Math.floor((now - state.timerStart) / 1000);
+    const phase = state.phase;
+
+    if (phase === 'match' && elapsed >= MATCH_TIME) {
+      clearInterval(tick); clockRunning = false;
+      // switch to vote phase
+      await update(ref(db,'tournament'), { phase:'vote', timerStart: Date.now() });
+    } else if (phase === 'vote' && elapsed >= VOTE_TIME) {
+      clearInterval(tick); clockRunning = false;
+      const nextIdx = (state.currentPairIdx||0) + 1;
+      if (nextIdx >= (state.pairs||[]).length) {
+        await update(ref(db,'tournament'), { finished:true, phase:'done' });
+      } else {
+        await update(ref(db,'tournament'), {
+          phase:'match', currentPairIdx: nextIdx,
+          timerStart: Date.now(),
+          [`donePairs/${state.currentPairIdx||0}`]: true
+        });
+      }
+    }
+  }, 500);
+}
+
+// ── SCREENS ───────────────────────────────────────────
 function refreshUI() {
   if (currentScreen==='loading') {
     showScreen(state?.started ? 'vote' : 'waiting');
-  } else if (currentScreen==='vote') renderVote();
+    return;
+  }
+  if (currentScreen==='vote') renderVote();
   else if (currentScreen==='live') renderLeaderboard();
   else if (currentScreen==='admin') renderAdmin();
   else if (currentScreen==='winner') renderWinner();
-  else if (currentScreen==='draft') renderDraft();
-  else if (currentScreen==='waiting') renderWaiting();
+  else if (currentScreen==='waiting') { if(state?.started) showScreen('vote'); }
 }
 
 function showScreen(id) {
@@ -91,216 +129,91 @@ function showScreen(id) {
   document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
   const nb = document.getElementById('nav-'+id);
   if (nb) nb.classList.add('active');
-  document.getElementById('main-nav').classList.toggle('hidden', !isAdmin);
+  document.getElementById('main-nav').classList.toggle('hidden',!isAdmin);
   if (id==='vote') renderVote();
-  if (id==='live') renderLeaderboard();
-  if (id==='admin') renderAdmin();
-  if (id==='winner') renderWinner();
-  if (id==='draft') renderDraft();
-  if (id==='waiting') renderWaiting();
-  if (id==='edit') renderEdit();
+  else if (id==='live') renderLeaderboard();
+  else if (id==='admin') renderAdmin();
+  else if (id==='winner') renderWinner();
+  else if (id==='draft') renderDraft();
+  else if (id==='edit') renderEdit();
 }
 window.showScreen = showScreen;
 
-function renderWaiting() {
-  if (state?.started) showScreen('vote');
-}
-
-window.tryAdminLogin = function() {
-  const pw = document.getElementById('admin-pw').value;
-  if (pw === ADMIN_PASS) {
-    isAdmin = true;
-    document.getElementById('screen-login').classList.add('hidden');
-    document.getElementById('main-nav').classList.remove('hidden');
-    showScreen('admin');
-  } else {
-    document.getElementById('login-err').textContent = 'סיסמה שגויה ❌';
-  }
-}
-
+// ── LOGIN ─────────────────────────────────────────────
 window.openAdmin = function() {
   if (isAdmin) { showScreen('admin'); return; }
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
   document.getElementById('screen-login').classList.remove('hidden');
 }
-
-function renderEdit() {
-  document.getElementById('edit-list').innerHTML = playerNames.map((n,i)=>`
-    <div class="edit-row" id="edit-row-${i}">
-      <span class="edit-num">${i+1}</span>
-      <span class="edit-name" id="ename-${i}">${n}</span>
-      <button class="btn-icon" onclick="startEdit(${i})">✏️</button>
-    </div>
-  `).join('');
-}
-
-window.startEdit = function(i) {
-  editingIdx = i;
-  document.getElementById(`ename-${i}`).innerHTML =
-    `<input id="edit-input-${i}" class="edit-input" value="${playerNames[i]}" />`;
-  document.getElementById(`edit-row-${i}`).innerHTML +=
-    `<button class="btn-icon" onclick="saveEdit(${i})">✅</button>`;
-}
-
-window.saveEdit = async function(i) {
-  const val = document.getElementById(`edit-input-${i}`)?.value?.trim();
-  if (val) playerNames[i] = val;
-  await set(ref(db,'playerNames'), playerNames);
-  renderEdit();
-}
-
-function renderDraft() {
-  orderSelection = [];
-  const grid = document.getElementById('draft-grid');
-  grid.innerHTML = playerNames.map((n,i)=>`
-    <div class="draft-card" id="dc-${i}" onclick="selectPlayer(${i})">
-      <div class="draft-avatar">${n.charAt(0)}</div>
-      <div class="draft-name">${n}</div>
-      <div class="draft-badge hidden" id="db-${i}"></div>
-    </div>
-  `).join('');
-  document.getElementById('draft-confirm').disabled = true;
-  document.getElementById('draft-status').textContent = 'לחץ על השחקנים לפי סדר מספרם (1 ראשון)';
-}
-
-window.selectPlayer = function(i) {
-  if (orderSelection.includes(i)) return;
-  orderSelection.push(i);
-  const num = orderSelection.length;
-  const badge = document.getElementById(`db-${i}`);
-  badge.textContent = num;
-  badge.classList.remove('hidden');
-  document.getElementById(`dc-${i}`).classList.add('selected');
-  document.getElementById('draft-status').textContent =
-    num < playerNames.length ? `בחרת ${num} — המשך...` : 'כל השחקנים נבחרו! ✅';
-  if (num === playerNames.length)
-    document.getElementById('draft-confirm').disabled = false;
-}
-
-window.confirmDraft = async function() {
-  const orderedNames = orderSelection.map(i => playerNames[i]);
-  const pairs = generatePairs(orderedNames.length);
-  await set(ref(db,'tournament'), {
-    started: false, finished: false,
-    currentPairIdx: 0,
-    timerStart: null,
-    orderedNames,
-    pairs: pairs.map(p=>({p1:p.p1,p2:p.p2})),
-    votes: {}, donePairs: {}
-  });
-  showScreen('admin');
-}
-
-function renderAdmin() {
-  if (!state) {
-    document.getElementById('admin-content').innerHTML = `
-      <div class="info-box">עדיין לא נקבע סדר שחקנים.<br>לחץ "הגרלה / סדר שחקנים" להתחיל.</div>`;
-    return;
+window.tryAdminLogin = function() {
+  if (document.getElementById('admin-pw').value === ADMIN_PASS) {
+    isAdmin = true;
+    document.getElementById('screen-login').classList.add('hidden');
+    document.getElementById('main-nav').classList.remove('hidden');
+    showScreen('admin');
+    if (state?.phase==='match'||state?.phase==='vote') runAdminClock();
+  } else {
+    document.getElementById('login-err').textContent = 'סיסמה שגויה ❌';
   }
-  const names = state.orderedNames || playerNames;
-  const idx = state.currentPairIdx || 0;
-  const pairs = state.pairs || [];
-  const donePairs = state.donePairs || {};
-  const totalVotes = Object.values(state.votes||{}).reduce((a,v)=>a+Object.keys(v).length,0);
-
-  document.getElementById('admin-content').innerHTML = `
-    <div class="card">
-      <div class="info-row">
-        <button class="btn btn-green" onclick="startTournament()">▶️ התחל תחרות</button>
-        <button class="btn btn-red" onclick="resetTournament()">🔄 איפוס</button>
-      </div>
-      <div class="info-row" style="margin-top:8px">
-        <button class="btn btn-blue" onclick="prevMatch()">⬅️ קודם</button>
-        <button class="btn btn-blue" onclick="nextMatch()">הבא ➡️</button>
-      </div>
-    </div>
-    <div class="card">
-      <div style="font-weight:700;margin-bottom:6px;color:#f0e68c">📊 סטטיסטיקות</div>
-      <div style="font-size:0.88rem;color:#ccc;line-height:2">
-        משחק נוכחי: ${idx+1} / ${pairs.length}<br>
-        סה"כ הצבעות: ${totalVotes}<br>
-        סטטוס: ${state.started?(state.finished?'🏁 הסתיים':'▶️ פעיל'):'⏸️ טרם התחיל'}
-      </div>
-    </div>
-    <div class="card">
-      <div style="font-weight:700;margin-bottom:10px;color:#f0e68c">📋 כל הזוגות (${pairs.length})</div>
-      <div class="pair-grid">${pairs.map((p,i)=>`
-        <div class="pair-card ${donePairs[i]?'done':''} ${i===idx?'current':''}" onclick="jumpToPair(${i})">
-          ${i+1}.<br>${names[p.p1]?.split(' ')[0]||'?'}<br>vs<br>${names[p.p2]?.split(' ')[0]||'?'}
-          <br><small>${Object.keys(state.votes?.[i]||{}).length}✉ ${donePairs[i]?'✓':''}</small>
-        </div>`).join('')}
-      </div>
-    </div>`;
 }
 
-window.startTournament = async function() {
-  if (!state?.pairs) { alert('קודם כל בצע הגרלה!'); return; }
-  await update(ref(db,'tournament'), { started:true, timerStart: Date.now() });
-  startLocalTimer();
-}
-
-window.nextMatch = async function() {
-  if (!state) return;
-  const idx = state.currentPairIdx || 0;
-  const newIdx = idx + 1;
-  if (newIdx >= (state.pairs||[]).length) {
-    await update(ref(db,'tournament'), { finished:true }); return;
-  }
-  await update(ref(db,'tournament'), {
-    currentPairIdx: newIdx, timerStart: Date.now(), [`donePairs/${idx}`]: true
-  });
-  startLocalTimer();
-}
-
-window.prevMatch = async function() {
-  if (!state) return;
-  const idx = state.currentPairIdx || 0;
-  if (idx <= 0) return;
-  await update(ref(db,'tournament'), { currentPairIdx: idx-1, timerStart: Date.now() });
-  startLocalTimer();
-}
-
-window.jumpToPair = async function(i) {
-  await update(ref(db,'tournament'), { currentPairIdx: i, timerStart: Date.now() });
-  startLocalTimer();
-}
-
-window.resetTournament = async function() {
-  if (!confirm('לאפס את כל התחרות?')) return;
-  await remove(ref(db,'tournament'));
-}
-
-function startLocalTimer() {
-  clearInterval(timerInterval);
-  let t = 40;
-  updateTimerUI(t);
-  timerInterval = setInterval(()=>{ updateTimerUI(--t); if(t<=0) clearInterval(timerInterval); },1000);
-}
-
+// ── VOTE SCREEN ───────────────────────────────────────
 function renderVote() {
   if (!state?.started) { showScreen('waiting'); return; }
+  if (state.finished) { showScreen('winner'); return; }
+
   const idx = state.currentPairIdx || 0;
   const pair = (state.pairs||[])[idx];
   const names = state.orderedNames || playerNames;
   if (!pair) return;
-  document.getElementById('p1-name').textContent = names[pair.p1] || '?';
-  document.getElementById('p2-name').textContent = names[pair.p2] || '?';
-  document.getElementById('match-num').textContent = `משחק ${idx+1} מתוך ${(state.pairs||[]).length}`;
+
+  const phase = state.phase || 'match';
   const elapsed = state.timerStart ? Math.floor((Date.now()-state.timerStart)/1000) : 0;
-  updateTimerUI(Math.max(0, 40-elapsed));
+  const total = phase==='match' ? MATCH_TIME : VOTE_TIME;
+  const remaining = Math.max(0, total - elapsed);
+
+  // Show correct panel
+  document.getElementById('vote-match-panel').classList.toggle('hidden', phase!=='match');
+  document.getElementById('vote-vote-panel').classList.toggle('hidden', phase!=='vote');
+
+  document.getElementById('p1-name').textContent = names[pair.p1]||'?';
+  document.getElementById('p2-name').textContent = names[pair.p2]||'?';
+  document.getElementById('match-num').textContent = `משחק ${idx+1} מתוך ${(state.pairs||[]).length}`;
+
+  // Vote panel
+  document.getElementById('vp-p1').textContent = names[pair.p1]||'?';
+  document.getElementById('vp-p2').textContent = names[pair.p2]||'?';
   const myVote = state.votes?.[idx]?.[voterId];
-  document.getElementById('stars-area').classList.toggle('hidden', !!myVote);
-  document.getElementById('voted-msg').classList.toggle('hidden', !myVote);
+  document.getElementById('stars-area').classList.toggle('hidden',!!myVote);
+  document.getElementById('voted-msg').classList.toggle('hidden',!myVote);
   if (!myVote) { selectedStars=0; updateStarsUI(); document.getElementById('submit-btn').disabled=true; }
+
+  // Timer
+  updateTimerUI(remaining, phase);
+  clearInterval(localTimer);
+  let t = remaining;
+  localTimer = setInterval(()=>{
+    t--;
+    if (t < 0) { clearInterval(localTimer); return; }
+    updateTimerUI(t, phase);
+  },1000);
 }
 
-function updateTimerUI(t) {
+function updateTimerUI(t, phase) {
   const el = document.getElementById('timer-text');
   const circ = document.getElementById('timer-circle');
+  const label = document.getElementById('timer-label');
   if (!el||!circ) return;
   el.textContent = t;
-  circ.style.strokeDashoffset = 264*(1-t/40);
-  circ.style.stroke = t>15?'#f0e68c':t>8?'#ff9800':'#e74c3c';
+  const total = phase==='vote' ? VOTE_TIME : MATCH_TIME;
+  circ.style.strokeDashoffset = 264*(1-t/total);
+  if (phase==='vote') {
+    circ.style.stroke = '#3498db';
+    if (label) label.textContent = '⭐ הצבע!';
+  } else {
+    circ.style.stroke = t>15?'#f0e68c':t>8?'#ff9800':'#e74c3c';
+    if (label) label.textContent = '🥋 משחק';
+  }
 }
 
 window.rateStar = function(n) {
@@ -316,8 +229,9 @@ window.submitVote = async function() {
   await update(ref(db,`tournament/votes/${idx}`),{[voterId]:selectedStars});
 }
 
+// ── LEADERBOARD ───────────────────────────────────────
 function calcScores() {
-  const names = state?.orderedNames || playerNames;
+  const names = state?.orderedNames||playerNames;
   const scores = new Array(names.length).fill(0);
   if (!state?.votes) return scores;
   Object.entries(state.votes).forEach(([pIdx,pVotes])=>{
@@ -331,7 +245,7 @@ function calcScores() {
 }
 
 function renderLeaderboard() {
-  const names = state?.orderedNames || playerNames;
+  const names = state?.orderedNames||playerNames;
   const scores = calcScores();
   const sorted = names.map((n,i)=>({n,s:scores[i]})).sort((a,b)=>b.s-a.s);
   const max = sorted[0]?.s||1;
@@ -347,11 +261,149 @@ function renderLeaderboard() {
     </div>`).join('');
 }
 
+// ── ADMIN ─────────────────────────────────────────────
+function renderAdmin() {
+  if (!state) {
+    document.getElementById('admin-content').innerHTML =
+      `<div class="info-box">עדיין לא נקבע סדר שחקנים — לחץ "הגרלה".</div>`;
+    return;
+  }
+  const names = state.orderedNames||playerNames;
+  const idx = state.currentPairIdx||0;
+  const pairs = state.pairs||[];
+  const donePairs = state.donePairs||{};
+  const phase = state.phase||'idle';
+  const totalVotes = Object.values(state.votes||{}).reduce((a,v)=>a+Object.keys(v).length,0);
+  const phaseLabel = phase==='match'?'🥋 משחק':phase==='vote'?'⭐ הצבעה':phase==='done'?'🏁 הסתיים':'⏸️ טרם התחיל';
+
+  document.getElementById('admin-content').innerHTML = `
+    <div class="card">
+      <div class="info-row">
+        <button class="btn btn-green" onclick="startTournament()">▶️ התחל</button>
+        <button class="btn btn-red" onclick="resetTournament()">🔄 איפוס</button>
+      </div>
+      <div class="info-row" style="margin-top:8px">
+        <button class="btn btn-blue" onclick="prevMatch()">⬅️ קודם</button>
+        <button class="btn btn-blue" onclick="nextMatch()">הבא ➡️</button>
+      </div>
+    </div>
+    <div class="card">
+      <div style="font-weight:700;margin-bottom:6px;color:#f0e68c">📊 סטטיסטיקות</div>
+      <div style="font-size:0.88rem;color:#ccc;line-height:2">
+        שלב: ${phaseLabel}<br>
+        משחק: ${idx+1} / ${pairs.length}<br>
+        הצבעות: ${totalVotes}
+      </div>
+    </div>
+    <div class="card">
+      <div style="font-weight:700;margin-bottom:10px;color:#f0e68c">📋 כל הזוגות (${pairs.length})</div>
+      <div class="pair-grid">${pairs.map((p,i)=>`
+        <div class="pair-card ${donePairs[i]?'done':''} ${i===idx?'current':''}" onclick="jumpToPair(${i})">
+          ${i+1}.<br>${names[p.p1]?.split(' ')[0]||'?'}<br>vs<br>${names[p.p2]?.split(' ')[0]||'?'}
+          <br><small>${Object.keys(state.votes?.[i]||{}).length}✉${donePairs[i]?' ✓':''}</small>
+        </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+window.startTournament = async function() {
+  if (!state?.pairs) { alert('קודם כל בצע הגרלה!'); return; }
+  await update(ref(db,'tournament'), { started:true, phase:'match', timerStart:Date.now() });
+  runAdminClock();
+}
+window.nextMatch = async function() {
+  if (!state) return;
+  const idx = state.currentPairIdx||0;
+  const nextIdx = idx+1;
+  if (nextIdx >= (state.pairs||[]).length) {
+    await update(ref(db,'tournament'),{finished:true,phase:'done'}); return;
+  }
+  await update(ref(db,'tournament'),{
+    phase:'match', currentPairIdx:nextIdx,
+    timerStart:Date.now(), [`donePairs/${idx}`]:true
+  });
+  clockRunning=false; runAdminClock();
+}
+window.prevMatch = async function() {
+  if (!state) return;
+  const idx = state.currentPairIdx||0;
+  if (idx<=0) return;
+  await update(ref(db,'tournament'),{phase:'match',currentPairIdx:idx-1,timerStart:Date.now()});
+  clockRunning=false; runAdminClock();
+}
+window.jumpToPair = async function(i) {
+  await update(ref(db,'tournament'),{phase:'match',currentPairIdx:i,timerStart:Date.now()});
+  clockRunning=false; runAdminClock();
+}
+window.resetTournament = async function() {
+  if (!confirm('לאפס את כל התחרות?')) return;
+  clockRunning=false; clearInterval(localTimer);
+  await remove(ref(db,'tournament'));
+}
+
+// ── DRAFT ─────────────────────────────────────────────
+function renderDraft() {
+  orderSelection=[];
+  document.getElementById('draft-grid').innerHTML = playerNames.map((n,i)=>`
+    <div class="draft-card" id="dc-${i}" onclick="selectPlayer(${i})">
+      <div class="draft-avatar">${n.charAt(0)}</div>
+      <div class="draft-name">${n}</div>
+      <div class="draft-badge hidden" id="db-${i}"></div>
+    </div>`).join('');
+  document.getElementById('draft-confirm').disabled=true;
+  document.getElementById('draft-status').textContent='לחץ על השחקנים לפי סדר מספרם (1 ראשון)';
+}
+window.selectPlayer = function(i) {
+  if (orderSelection.includes(i)) return;
+  orderSelection.push(i);
+  const num=orderSelection.length;
+  const badge=document.getElementById(`db-${i}`);
+  badge.textContent=num; badge.classList.remove('hidden');
+  document.getElementById(`dc-${i}`).classList.add('selected');
+  document.getElementById('draft-status').textContent=
+    num<playerNames.length?`בחרת ${num} — המשך...`:'כל השחקנים נבחרו! ✅';
+  if (num===playerNames.length) document.getElementById('draft-confirm').disabled=false;
+}
+window.confirmDraft = async function() {
+  const orderedNames=orderSelection.map(i=>playerNames[i]);
+  const pairs=generatePairs(orderedNames.length);
+  await set(ref(db,'tournament'),{
+    started:false,finished:false,phase:'idle',
+    currentPairIdx:0,timerStart:null,
+    orderedNames,pairs:pairs.map(p=>({p1:p.p1,p2:p.p2})),
+    votes:{},donePairs:{}
+  });
+  showScreen('admin');
+}
+
+// ── EDIT ──────────────────────────────────────────────
+function renderEdit() {
+  document.getElementById('edit-list').innerHTML=playerNames.map((n,i)=>`
+    <div class="edit-row" id="edit-row-${i}">
+      <span class="edit-num">${i+1}</span>
+      <span class="edit-name" id="ename-${i}">${n}</span>
+      <button class="btn-icon" onclick="startEdit(${i})">✏️</button>
+    </div>`).join('');
+}
+window.startEdit=function(i){
+  document.getElementById(`ename-${i}`).innerHTML=
+    `<input id="edit-input-${i}" class="edit-input" value="${playerNames[i]}"/>`;
+  document.getElementById(`edit-row-${i}`).innerHTML+=
+    `<button class="btn-icon" onclick="saveEdit(${i})">✅</button>`;
+}
+window.saveEdit=async function(i){
+  const val=document.getElementById(`edit-input-${i}`)?.value?.trim();
+  if(val) playerNames[i]=val;
+  await set(ref(db,'playerNames'),playerNames);
+  renderEdit();
+}
+
+// ── WINNER ────────────────────────────────────────────
 function renderWinner() {
-  const names = state?.orderedNames || playerNames;
-  const scores = calcScores();
-  const sorted = names.map((n,i)=>({n,s:scores[i]})).sort((a,b)=>b.s-a.s);
-  document.getElementById('podium').innerHTML = [1,0,2].map(i=>{
+  const names=state?.orderedNames||playerNames;
+  const scores=calcScores();
+  const sorted=names.map((n,i)=>({n,s:scores[i]})).sort((a,b)=>b.s-a.s);
+  document.getElementById('podium').innerHTML=[1,0,2].map(i=>{
     const m=[{cls:'p2',e:'🥈'},{cls:'p1',e:'🥇'},{cls:'p3',e:'🥉'}];
     return `<div class="podium-place ${m[i].cls}">
       <div style="font-size:0.82rem;font-weight:700">${sorted[i]?.n||'?'}</div>
@@ -359,15 +411,14 @@ function renderWinner() {
       <div style="font-size:0.72rem;opacity:0.8">${sorted[i]?.s.toFixed(1)||0}⭐</div>
     </div>`;
   }).join('');
-  document.getElementById('full-ranking').innerHTML = sorted.map((e,i)=>`
+  document.getElementById('full-ranking').innerHTML=sorted.map((e,i)=>`
     <div class="lb-row rank-${i+1}">
       <div class="lb-rank">${['🥇','🥈','🥉'][i]||'#'+(i+1)}</div>
       <div class="lb-name">${e.n}</div>
       <div class="lb-score">${e.s.toFixed(2)}⭐</div>
     </div>`).join('');
 }
-
-window.triggerConfetti = function() {
+window.triggerConfetti=function(){
   const canvas=document.getElementById('confetti-canvas');
   canvas.classList.remove('hidden');
   canvas.width=window.innerWidth; canvas.height=window.innerHeight;
@@ -391,8 +442,8 @@ window.triggerConfetti = function() {
   })();
 }
 
+// init
 showScreen('loading');
-document.getElementById('loading-msg').textContent = '🥋 טוען...';
 setTimeout(()=>{ if(currentScreen==='loading') showScreen(state?.started?'vote':'waiting'); },2000);
 </script>
 <style>
@@ -417,18 +468,22 @@ h1{font-size:1.35rem;color:#f0e68c;margin-bottom:5px}
 .btn:disabled{opacity:0.4;cursor:not-allowed;transform:none}
 .info-row{display:flex;gap:8px}
 .info-row .btn{margin-top:0}
-.timer-ring{width:86px;height:86px;margin:0 auto 10px}
+.timer-ring{width:86px;height:86px;margin:0 auto 6px}
 .timer-ring svg{transform:rotate(-90deg)}
 .timer-ring circle{fill:none;stroke-width:8}
 .timer-bg{stroke:rgba(255,255,255,0.1)}
 .timer-fg{stroke:#f0e68c;stroke-linecap:round;transition:stroke-dashoffset 1s linear}
 .timer-text{position:relative;text-align:center;margin-top:-62px;font-size:1.55rem;font-weight:700;color:#f0e68c;line-height:86px}
+.timer-label{text-align:center;font-size:0.8rem;color:#aaa;margin-bottom:10px}
 .stars{display:flex;justify-content:center;gap:8px;margin:12px 0;direction:ltr}
 .star{font-size:2.1rem;cursor:pointer;transition:transform 0.15s;filter:grayscale(1)opacity(0.4)}
 .star.lit{filter:none;transform:scale(1.15)}
-.match-display{text-align:center;padding:10px 0}
+.match-display{text-align:center;padding:8px 0}
 .vs{font-size:1.7rem;font-weight:900;color:#f0e68c;margin:5px 0}
 .player-name{font-size:1.05rem;font-weight:700}
+.vote-panel{background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:16px;padding:18px;margin-bottom:13px;text-align:center}
+.vote-panel h2{color:#60a5fa;margin-bottom:4px;font-size:1.1rem}
+.vote-vs{font-size:0.9rem;color:#aaa;margin-bottom:12px}
 .lb-row{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:11px;margin-bottom:7px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)}
 .lb-row.rank-1{background:rgba(255,215,0,0.12);border-color:gold}
 .lb-row.rank-2{background:rgba(192,192,192,0.1);border-color:silver}
@@ -438,8 +493,8 @@ h1{font-size:1.35rem;color:#f0e68c;margin-bottom:5px}
 .lb-score{font-size:0.95rem;font-weight:700;color:#f0e68c}
 .lb-bar-bg{height:5px;background:rgba(255,255,255,0.1);border-radius:99px;margin-top:3px;overflow:hidden}
 .lb-bar{height:100%;border-radius:99px;background:linear-gradient(90deg,#f0e68c,#d4ac0d);transition:width 0.8s}
-.pair-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}
-.pair-card{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:9px;padding:6px;text-align:center;font-size:0.72rem;cursor:pointer;transition:all 0.2s;line-height:1.5}
+.pair-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.pair-card{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:9px;padding:6px;text-align:center;font-size:0.72rem;cursor:pointer;line-height:1.5;transition:all 0.2s}
 .pair-card.done{opacity:0.35;border-color:#2ecc71}
 .pair-card.current{border-color:#f0e68c;background:rgba(240,230,140,0.12)}
 .podium{display:flex;align-items:flex-end;justify-content:center;gap:8px;margin:14px 0}
@@ -477,32 +532,36 @@ h1{font-size:1.35rem;color:#f0e68c;margin-bottom:5px}
   <h2>🥋 קפוארה</h2>
 </nav>
 
+<!-- LOADING -->
 <div id="screen-loading" class="screen">
-  <div class="waiting-box"><div style="font-size:3rem">🥋</div><div id="loading-msg" style="margin-top:12px;color:#f0e68c;font-size:1.1rem"></div></div>
+  <div class="waiting-box"><div style="font-size:3rem">🥋</div><div style="margin-top:12px;color:#f0e68c;font-size:1.1rem">טוען...</div></div>
 </div>
 
+<!-- WAITING -->
 <div id="screen-waiting" class="screen hidden">
   <div class="waiting-box">
     <div style="font-size:3.5rem">⏳</div>
     <div style="font-size:1.2rem;font-weight:700;color:#f0e68c;margin-top:14px">התחרות תתחיל בקרוב!</div>
     <div style="color:#aaa;font-size:0.9rem;margin-top:8px">ממתין למארגן...</div>
-    <div style="margin-top:24px;color:#777;font-size:0.8rem">אתה צופה / שופט<br>ברגע שהתחרות תתחיל — המסך יתעדכן אוטומטית</div>
+    <div style="margin-top:20px;color:#666;font-size:0.8rem">ברגע שהתחרות תתחיל המסך יתעדכן אוטומטית</div>
     <button class="btn btn-purple" style="margin-top:28px;width:auto;padding:10px 24px" onclick="openAdmin()">🔐 כניסת מארגן</button>
   </div>
 </div>
 
+<!-- LOGIN -->
 <div id="screen-login" class="screen hidden">
   <div class="login-box">
     <div style="font-size:2.5rem;margin-bottom:12px">🔐</div>
     <h1>כניסת מארגן</h1>
     <p class="sub">הזן סיסמה להמשך</p>
     <input class="login-input" id="admin-pw" type="password" placeholder="****" maxlength="10"
-      onkeydown="if(event.key==='Enter') tryAdminLogin()" />
+      onkeydown="if(event.key==='Enter') tryAdminLogin()"/>
     <div id="login-err" style="color:#e74c3c;font-size:0.85rem;margin-bottom:8px;min-height:18px"></div>
     <button class="btn btn-gold" onclick="tryAdminLogin()">כניסה ✅</button>
   </div>
 </div>
 
+<!-- DRAFT -->
 <div id="screen-draft" class="screen hidden">
   <h1>🎲 סדר שחקנים</h1>
   <p class="sub">לחץ על השחקנים לפי סדר המספרים שלהם (1 ראשון)</p>
@@ -511,15 +570,19 @@ h1{font-size:1.35rem;color:#f0e68c;margin-bottom:5px}
   <button class="btn btn-gold" id="draft-confirm" disabled onclick="confirmDraft()">אשר וצא לתחרות ✅</button>
 </div>
 
+<!-- EDIT -->
 <div id="screen-edit" class="screen hidden">
   <h1>✏️ עריכת שמות</h1>
   <p class="sub">לחץ על ✏️ ליד שם לעריכה</p>
   <div id="edit-list"></div>
 </div>
 
+<!-- VOTE -->
 <div id="screen-vote" class="screen hidden">
-  <h1>🗳️ הצבע עכשיו</h1>
-  <div class="card">
+  <h1>🥋 תחרות קפוארה</h1>
+
+  <!-- MATCH PANEL -->
+  <div id="vote-match-panel" class="card">
     <div class="match-display">
       <div class="timer-ring">
         <svg width="86" height="86" viewBox="0 0 100 100">
@@ -528,13 +591,22 @@ h1{font-size:1.35rem;color:#f0e68c;margin-bottom:5px}
         </svg>
         <div class="timer-text" id="timer-text">40</div>
       </div>
+      <div id="timer-label" class="timer-label">🥋 משחק</div>
       <div class="player-name" id="p1-name"></div>
       <div class="vs">VS</div>
       <div class="player-name" id="p2-name"></div>
       <div style="color:#aaa;font-size:0.8rem;margin-top:5px" id="match-num"></div>
     </div>
+  </div>
+
+  <!-- VOTE PANEL -->
+  <div id="vote-vote-panel" class="vote-panel hidden">
+    <h2>⭐ זמן הצבעה!</h2>
+    <div class="vote-vs" id="vp-p1"></div>
+    <div style="color:#60a5fa;font-size:0.8rem">VS</div>
+    <div class="vote-vs" id="vp-p2"></div>
     <div id="stars-area">
-      <p style="text-align:center;color:#ccc;font-size:0.87rem;margin-bottom:2px">כמה כוכבים לזוג זה?</p>
+      <p style="color:#ccc;font-size:0.87rem;margin:10px 0 2px">כמה כוכבים לזוג זה?</p>
       <div class="stars">
         <span class="star" onclick="rateStar(1)">⭐</span>
         <span class="star" onclick="rateStar(2)">⭐</span>
@@ -544,26 +616,28 @@ h1{font-size:1.35rem;color:#f0e68c;margin-bottom:5px}
       </div>
       <button class="btn btn-gold" id="submit-btn" disabled onclick="submitVote()">שלח הצבעה ✨</button>
     </div>
-    <div id="voted-msg" class="hidden" style="text-align:center;padding:16px">
-      <div style="font-size:2.5rem">✅</div>
-      <div style="color:#2ecc71;font-weight:700;margin-top:8px">הצבעתך נרשמה!</div>
-      <div style="color:#aaa;font-size:0.85rem;margin-top:4px">ממתין למשחק הבא...</div>
+    <div id="voted-msg" class="hidden" style="padding:14px">
+      <div style="font-size:2rem">✅</div>
+      <div style="color:#2ecc71;font-weight:700;margin-top:6px">הצבעתך נרשמה!</div>
     </div>
   </div>
 </div>
 
+<!-- LIVE -->
 <div id="screen-live" class="screen hidden">
   <h1>📊 טבלת ניקוד</h1>
   <p class="sub">מתעדכן בזמן אמת</p>
   <div id="leaderboard"></div>
 </div>
 
+<!-- ADMIN -->
 <div id="screen-admin" class="screen hidden">
   <h1>⚙️ ניהול תחרות</h1>
   <p class="sub">שליטה מלאה — רק למארגן</p>
   <div id="admin-content"></div>
 </div>
 
+<!-- WINNER -->
 <div id="screen-winner" class="screen hidden">
   <h1 style="text-align:center">🏆 תוצאות סופיות</h1>
   <p class="sub" style="text-align:center">מזל טוב לכל המשתתפים!</p>
