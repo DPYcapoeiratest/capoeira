@@ -26,10 +26,10 @@ const MATCH_TIME = 40;
 const VOTE_TIME = 10;
 
 const CRITERIA = [
-  { key:'fall',   label:'הפלה',            emoji:'🥊', points:1 },
-  { key:'catch',  label:'תפיסה',           emoji:'🤲', points:1 },
-  { key:'acro',   label:'אקרובטיקה',       emoji:'🤸', points:1 },
-  { key:'combo',  label:'קומבו',           emoji:'💥', points:3 },
+  {key:'fall',  label:'הפלה',      emoji:'🥊', pts:1},
+  {key:'catch', label:'תפיסה',     emoji:'🤲', pts:1},
+  {key:'acro',  label:'אקרובטיקה', emoji:'🤸', pts:1},
+  {key:'combo', label:'קומבו',     emoji:'💥', pts:3},
 ];
 
 const DEFAULT_PLAYERS = [
@@ -37,9 +37,9 @@ const DEFAULT_PLAYERS = [
   "ז'וגיוס סאן","סגיבוש מרויליוש","חנוש","עדן קורוז'יו"
 ];
 
-function generatePairs(n) {
-  const p = Array.from({length:n},(_,i)=>i);
-  if (p.length%2!==0) p.push(-1);
+function generatePairs(n){
+  const p=Array.from({length:n},(_,i)=>i);
+  if(p.length%2!==0) p.push(-1);
   const half=p.length/2, rounds=[];
   for(let r=0;r<p.length-1;r++){
     const round=[];
@@ -52,10 +52,10 @@ function generatePairs(n) {
 }
 
 let state=null, currentScreen='loading', selectedStars=0;
-let localTimer=null, isAdmin=false, clockRunning=false;
+let localTick=null, isAdmin=false, adminClockId=null;
 let playerNames=[...DEFAULT_PLAYERS], orderSelection=[];
-// local criteria counts per match (reset each match)
 let localCriteria={fall:0,catch:0,acro:0,combo:0};
+let lastPairIdx=-1;
 
 const voterId=(()=>{
   let id=localStorage.getItem('cap_vid');
@@ -63,14 +63,15 @@ const voterId=(()=>{
   return id;
 })();
 
+// ── FIREBASE LISTENERS ────────────────────────────────
 onValue(ref(db,'tournament'),snap=>{
   const prev=state;
   state=snap.val();
-  // reset local criteria when match changes
-  if(prev&&state&&prev.currentPairIdx!==state.currentPairIdx) resetLocalCriteria();
-  if(prev&&state&&prev.phase!==state.phase&&state.phase==='vote') buildSummary();
+  if(state && state.currentPairIdx !== lastPairIdx){
+    lastPairIdx = state.currentPairIdx||0;
+    localCriteria={fall:0,catch:0,acro:0,combo:0};
+  }
   refreshUI();
-  if(isAdmin&&state?.started&&!state?.finished) runAdminClock();
 });
 onValue(ref(db,'playerNames'),snap=>{
   if(snap.val()) playerNames=snap.val();
@@ -78,43 +79,59 @@ onValue(ref(db,'playerNames'),snap=>{
   if(currentScreen==='draft') renderDraft();
 });
 
-function resetLocalCriteria(){ localCriteria={fall:0,catch:0,acro:0,combo:0}; renderCriteria(); }
-
-function runAdminClock(){
-  if(clockRunning||!isAdmin) return;
-  clockRunning=true;
-  const tick=setInterval(async()=>{
-    if(!state){clearInterval(tick);clockRunning=false;return;}
-    const elapsed=Math.floor((Date.now()-state.timerStart)/1000);
-    const phase=state.phase;
-    if(phase==='match'&&elapsed>=MATCH_TIME){
-      clearInterval(tick);clockRunning=false;
-      await update(ref(db,'tournament'),{phase:'vote',timerStart:Date.now()});
-    } else if(phase==='vote'&&elapsed>=VOTE_TIME){
-      clearInterval(tick);clockRunning=false;
-      const nextIdx=(state.currentPairIdx||0)+1;
-      if(nextIdx>=(state.pairs||[]).length){
-        await update(ref(db,'tournament'),{finished:true,phase:'done'});
-      } else {
-        await update(ref(db,'tournament'),{
-          phase:'match',currentPairIdx:nextIdx,
-          timerStart:Date.now(),[`donePairs/${state.currentPairIdx||0}`]:true
-        });
+// ── ADMIN CLOCK ───────────────────────────────────────
+// Only admin drives phase transitions — uses phaseEndsAt stored in Firebase
+// so even if admin refreshes, it picks up correctly
+function startAdminClock(){
+  if(!isAdmin) return;
+  clearInterval(adminClockId);
+  adminClockId=setInterval(async()=>{
+    if(!state?.started||state?.finished) return;
+    const now=Date.now();
+    if(state.phaseEndsAt && now >= state.phaseEndsAt){
+      clearInterval(adminClockId);
+      if(state.phase==='match'){
+        // switch to vote phase
+        const endsAt=Date.now()+VOTE_TIME*1000;
+        await update(ref(db,'tournament'),{phase:'vote',timerStart:Date.now(),phaseEndsAt:endsAt});
+      } else if(state.phase==='vote'){
+        const nextIdx=(state.currentPairIdx||0)+1;
+        if(nextIdx>=(state.pairs||[]).length){
+          await update(ref(db,'tournament'),{finished:true,phase:'done'});
+        } else {
+          const endsAt=Date.now()+MATCH_TIME*1000;
+          await update(ref(db,'tournament'),{
+            phase:'match', currentPairIdx:nextIdx,
+            timerStart:Date.now(), phaseEndsAt:endsAt,
+            [`donePairs/${state.currentPairIdx||0}`]:true
+          });
+        }
       }
+      // restart clock after update
+      setTimeout(()=>startAdminClock(),600);
     }
-  },500);
+  },400);
 }
 
+// ── SCREENS ───────────────────────────────────────────
 function refreshUI(){
-  if(currentScreen==='loading'){showScreen(state?.started?'vote':'waiting');return;}
+  if(currentScreen==='loading'){
+    if(state===null) return; // still loading from Firebase
+    if(state?.finished) showScreen('winner');
+    else if(state?.started) showScreen('vote');
+    else showScreen('waiting');
+    return;
+  }
+  if(currentScreen==='waiting'){
+    if(state?.finished) showScreen('winner');
+    else if(state?.started) showScreen('vote');
+    return;
+  }
   if(currentScreen==='vote') renderVote();
   else if(currentScreen==='live') renderLeaderboard();
   else if(currentScreen==='admin') renderAdmin();
   else if(currentScreen==='winner') renderWinner();
-  else if(currentScreen==='waiting'){
-    if(state?.finished) showScreen('winner');
-    else if(state?.started) showScreen('vote');
-  }
+  else if(currentScreen==='draft') renderDraft();
 }
 
 function showScreen(id){
@@ -133,6 +150,7 @@ function showScreen(id){
 }
 window.showScreen=showScreen;
 
+// ── LOGIN ─────────────────────────────────────────────
 window.openAdmin=function(){
   if(isAdmin){showScreen('admin');return;}
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
@@ -144,67 +162,78 @@ window.tryAdminLogin=function(){
     document.getElementById('screen-login').classList.add('hidden');
     document.getElementById('main-nav').classList.remove('hidden');
     showScreen('admin');
-    if(state?.started&&!state?.finished) runAdminClock();
-  } else { document.getElementById('login-err').textContent='סיסמה שגויה ❌'; }
+    if(state?.started&&!state?.finished) startAdminClock();
+  } else {
+    document.getElementById('login-err').textContent='סיסמה שגויה ❌';
+  }
 };
 
-// ── VOTE SCREEN ──────────────────────────────────────
+// ── VOTE SCREEN ───────────────────────────────────────
 function renderVote(){
   if(!state?.started){showScreen('waiting');return;}
   if(state.finished){showScreen('winner');return;}
+
   const idx=state.currentPairIdx||0;
   const pair=(state.pairs||[])[idx];
   const names=state.orderedNames||playerNames;
   if(!pair) return;
-  const phase=state.phase||'match';
-  const elapsed=state.timerStart?Math.floor((Date.now()-state.timerStart)/1000):0;
-  const total=phase==='match'?MATCH_TIME:VOTE_TIME;
-  const remaining=Math.max(0,total-elapsed);
 
-  // show/hide panels
+  const phase=state.phase||'match';
+  const now=Date.now();
+  const remaining=state.phaseEndsAt ? Math.max(0,Math.ceil((state.phaseEndsAt-now)/1000)) : (phase==='match'?MATCH_TIME:VOTE_TIME);
+
+  // panels
   document.getElementById('vote-match-panel').classList.toggle('hidden',phase!=='match');
   document.getElementById('vote-vote-panel').classList.toggle('hidden',phase!=='vote');
 
-  // match panel
+  // names
   document.getElementById('p1-name').textContent=names[pair.p1]||'?';
   document.getElementById('p2-name').textContent=names[pair.p2]||'?';
   document.getElementById('match-num').textContent=`משחק ${idx+1} מתוך ${(state.pairs||[]).length}`;
-
-  // vote panel
   document.getElementById('vp-p1').textContent=names[pair.p1]||'?';
   document.getElementById('vp-p2').textContent=names[pair.p2]||'?';
-  const myVote=state.votes?.[idx]?.[voterId];
-  document.getElementById('stars-area').classList.toggle('hidden',!!myVote);
-  document.getElementById('voted-msg').classList.toggle('hidden',!myVote);
-  if(!myVote){selectedStars=0;updateStarsUI();document.getElementById('submit-btn').disabled=true;}
 
-  updateTimerUI(remaining,phase);
-  clearInterval(localTimer);
+  if(phase==='vote'){
+    buildSummary();
+    const myVote=state.votes?.[idx]?.[voterId];
+    document.getElementById('stars-area').classList.toggle('hidden',!!myVote);
+    document.getElementById('voted-msg').classList.toggle('hidden',!myVote);
+    if(!myVote){selectedStars=0;updateStarsUI();document.getElementById('submit-btn').disabled=true;}
+  }
+
+  // tick
+  clearInterval(localTick);
   let t=remaining;
-  localTimer=setInterval(()=>{
-    t--;
-    if(t<0){clearInterval(localTimer);return;}
+  updateTimerUI(t,phase);
+  localTick=setInterval(()=>{
+    t=state.phaseEndsAt?Math.max(0,Math.ceil((state.phaseEndsAt-Date.now())/1000)):t-1;
     updateTimerUI(t,phase);
-  },1000);
+    if(t<=0) clearInterval(localTick);
+  },500);
 
   renderCriteria();
 }
 
 function updateTimerUI(t,phase){
-  const el=document.getElementById('timer-text');
-  const circ=document.getElementById('timer-circle');
-  const wrap=document.getElementById('timer-wrap');
-  if(!el||!circ) return;
-  el.textContent=t;
-  const total=phase==='vote'?VOTE_TIME:MATCH_TIME;
-  circ.style.strokeDashoffset=264*(1-t/total);
-  if(phase==='vote'){
-    circ.style.stroke='#3b82f6';
-    if(wrap) wrap.style.background='rgba(59,130,246,0.2)';
+  // match timer
+  const mEl=document.getElementById('timer-text');
+  const mCirc=document.getElementById('timer-circle');
+  const mWrap=document.getElementById('timer-wrap');
+  // vote timer
+  const vEl=document.getElementById('vote-timer-num');
+
+  if(phase==='match'){
+    if(mEl) mEl.textContent=t;
+    if(mCirc){
+      mCirc.style.strokeDashoffset=264*(1-t/MATCH_TIME);
+      mCirc.style.stroke=t>15?'#f0e68c':t>8?'#ff9800':'#e74c3c';
+    }
+    if(mWrap) mWrap.style.background=t>15?'rgba(240,230,140,0.1)':t>8?'rgba(255,152,0,0.18)':'rgba(231,76,60,0.22)';
   } else {
-    const c=t>15?'#f0e68c':t>8?'#ff9800':'#e74c3c';
-    circ.style.stroke=c;
-    if(wrap) wrap.style.background=t>15?'rgba(240,230,140,0.1)':t>8?'rgba(255,152,0,0.15)':'rgba(231,76,60,0.2)';
+    if(vEl){
+      vEl.textContent=t;
+      vEl.style.color=t>5?'#3b82f6':'#e74c3c';
+    }
   }
 }
 
@@ -215,27 +244,25 @@ function renderCriteria(){
   el.innerHTML=CRITERIA.map(c=>`
     <div class="crit-card">
       <div class="crit-emoji">${c.emoji}</div>
-      <div class="crit-label">${c.label}</div>
-      ${c.key==='combo'?'<div class="crit-pts">+3 נק\'</div>':''}
+      <div class="crit-label">${c.label}${c.key==='combo'?' <span class="crit-pts">+3</span>':''}</div>
       <div class="crit-counter">
         <button class="crit-btn minus" onclick="changeCrit('${c.key}',-1)">−</button>
-        <span class="crit-count" id="cnt-${c.key}">${localCriteria[c.key]}</span>
+        <span class="crit-count" id="cnt-${c.key}">${localCriteria[c.key]||0}</span>
         <button class="crit-btn plus" onclick="changeCrit('${c.key}',1)">+</button>
       </div>
     </div>`).join('');
 }
-
 window.changeCrit=function(key,delta){
   localCriteria[key]=Math.max(0,(localCriteria[key]||0)+delta);
-  document.getElementById('cnt-'+key).textContent=localCriteria[key];
+  const el=document.getElementById('cnt-'+key);
+  if(el) el.textContent=localCriteria[key];
 };
 
 function buildSummary(){
   const el=document.getElementById('summary-box');
   if(!el) return;
-  const total=CRITERIA.reduce((s,c)=>s+(localCriteria[c.key]||0)*(c.key==='combo'?3:1),0);
   const hasAny=CRITERIA.some(c=>localCriteria[c.key]>0);
-  if(!hasAny){ el.innerHTML='<div style="color:#aaa;font-size:0.88rem">לא סומנו אירועים במשחק זה</div>'; return; }
+  if(!hasAny){el.innerHTML='<div style="color:#aaa;font-size:0.85rem;text-align:center">לא סומנו אירועים</div>';return;}
   el.innerHTML=`
     <div class="summary-title">📋 סיכום המשחק</div>
     <div class="summary-rows">
@@ -244,19 +271,13 @@ function buildSummary(){
           <span>${c.emoji} ${c.label}</span>
           <span class="summary-count">×${localCriteria[c.key]}</span>
         </div>`).join('')}
-    </div>
-    <div class="summary-total">סה"כ אירועים: <strong>${CRITERIA.reduce((s,c)=>s+(localCriteria[c.key]||0),0)}</strong></div>`;
+    </div>`;
 }
 
 // ── STARS ─────────────────────────────────────────────
-window.rateStar=function(n){
-  selectedStars=n; updateStarsUI();
-  document.getElementById('submit-btn').disabled=false;
-};
+window.rateStar=function(n){selectedStars=n;updateStarsUI();document.getElementById('submit-btn').disabled=false;};
 function updateStarsUI(){
-  document.querySelectorAll('.star').forEach((s,i)=>{
-    s.classList.toggle('lit',i<selectedStars);
-  });
+  document.querySelectorAll('.star').forEach((s,i)=>s.classList.toggle('lit',i<selectedStars));
 }
 window.submitVote=async function(){
   if(!selectedStars) return;
@@ -298,8 +319,7 @@ function renderLeaderboard(){
 // ── ADMIN ─────────────────────────────────────────────
 function renderAdmin(){
   if(!state){
-    document.getElementById('admin-content').innerHTML=
-      `<div class="info-box">עדיין לא נקבע סדר שחקנים — לחץ "הגרלה".</div>`;
+    document.getElementById('admin-content').innerHTML=`<div class="info-box">עדיין לא נקבע סדר שחקנים — לחץ "הגרלה".</div>`;
     return;
   }
   const names=state.orderedNames||playerNames;
@@ -338,30 +358,34 @@ function renderAdmin(){
 }
 window.startTournament=async function(){
   if(!state?.pairs){alert('קודם כל בצע הגרלה!');return;}
-  await update(ref(db,'tournament'),{started:true,phase:'match',timerStart:Date.now()});
-  clockRunning=false;runAdminClock();
+  const endsAt=Date.now()+MATCH_TIME*1000;
+  await update(ref(db,'tournament'),{started:true,phase:'match',timerStart:Date.now(),phaseEndsAt:endsAt});
+  startAdminClock();
 };
 window.nextMatch=async function(){
   if(!state) return;
-  const idx=state.currentPairIdx||0, nextIdx=idx+1;
+  const idx=state.currentPairIdx||0,nextIdx=idx+1;
   if(nextIdx>=(state.pairs||[]).length){await update(ref(db,'tournament'),{finished:true,phase:'done'});return;}
-  await update(ref(db,'tournament'),{phase:'match',currentPairIdx:nextIdx,timerStart:Date.now(),[`donePairs/${idx}`]:true});
-  clockRunning=false;runAdminClock();
+  const endsAt=Date.now()+MATCH_TIME*1000;
+  await update(ref(db,'tournament'),{phase:'match',currentPairIdx:nextIdx,timerStart:Date.now(),phaseEndsAt:endsAt,[`donePairs/${idx}`]:true});
+  startAdminClock();
 };
 window.prevMatch=async function(){
   if(!state) return;
   const idx=state.currentPairIdx||0;
   if(idx<=0) return;
-  await update(ref(db,'tournament'),{phase:'match',currentPairIdx:idx-1,timerStart:Date.now()});
-  clockRunning=false;runAdminClock();
+  const endsAt=Date.now()+MATCH_TIME*1000;
+  await update(ref(db,'tournament'),{phase:'match',currentPairIdx:idx-1,timerStart:Date.now(),phaseEndsAt:endsAt});
+  startAdminClock();
 };
 window.jumpToPair=async function(i){
-  await update(ref(db,'tournament'),{phase:'match',currentPairIdx:i,timerStart:Date.now()});
-  clockRunning=false;runAdminClock();
+  const endsAt=Date.now()+MATCH_TIME*1000;
+  await update(ref(db,'tournament'),{phase:'match',currentPairIdx:i,timerStart:Date.now(),phaseEndsAt:endsAt});
+  startAdminClock();
 };
 window.resetTournament=async function(){
   if(!confirm('לאפס את כל התחרות?')) return;
-  clockRunning=false;clearInterval(localTimer);
+  clearInterval(adminClockId);clearInterval(localTick);
   await remove(ref(db,'tournament'));
 };
 
@@ -381,18 +405,18 @@ window.selectPlayer=function(i){
   if(orderSelection.includes(i)) return;
   orderSelection.push(i);
   const num=orderSelection.length;
-  const badge=document.getElementById(`db-${i}`);
-  badge.textContent=num;badge.classList.remove('hidden');
+  document.getElementById(`db-${i}`).textContent=num;
+  document.getElementById(`db-${i}`).classList.remove('hidden');
   document.getElementById(`dc-${i}`).classList.add('selected');
-  document.getElementById('draft-status').textContent=
-    num<playerNames.length?`בחרת ${num} — המשך...`:'כל השחקנים נבחרו! ✅';
+  document.getElementById('draft-status').textContent=num<playerNames.length?`בחרת ${num} — המשך...`:'כל השחקנים נבחרו! ✅';
   if(num===playerNames.length) document.getElementById('draft-confirm').disabled=false;
 };
 window.confirmDraft=async function(){
   const orderedNames=orderSelection.map(i=>playerNames[i]);
   const pairs=generatePairs(orderedNames.length);
   await set(ref(db,'tournament'),{
-    started:false,finished:false,phase:'idle',currentPairIdx:0,timerStart:null,
+    started:false,finished:false,phase:'idle',currentPairIdx:0,
+    timerStart:null,phaseEndsAt:null,
     orderedNames,pairs:pairs.map(p=>({p1:p.p1,p2:p.p2})),votes:{},donePairs:{}
   });
   showScreen('admin');
@@ -408,10 +432,8 @@ function renderEdit(){
     </div>`).join('');
 }
 window.startEdit=function(i){
-  document.getElementById(`ename-${i}`).innerHTML=
-    `<input id="edit-input-${i}" class="edit-input" value="${playerNames[i]}"/>`;
-  document.getElementById(`edit-row-${i}`).innerHTML+=
-    `<button class="btn-icon" onclick="saveEdit(${i})">✅</button>`;
+  document.getElementById(`ename-${i}`).innerHTML=`<input id="edit-input-${i}" class="edit-input" value="${playerNames[i]}"/>`;
+  document.getElementById(`edit-row-${i}`).innerHTML+=`<button class="btn-icon" onclick="saveEdit(${i})">✅</button>`;
 };
 window.saveEdit=async function(i){
   const val=document.getElementById(`edit-input-${i}`)?.value?.trim();
@@ -464,16 +486,32 @@ window.triggerConfetti=function(){
   })();
 };
 
-// על רענון — אם יש מצב פעיל ב־Firebase, חזור אליו נכון
+// ── EMERGENCY RESET ───────────────────────────────────
+window.emergencyReset=function(){
+  clearInterval(adminClockId);
+  clearInterval(localTick);
+  localCriteria={fall:0,catch:0,acro:0,combo:0};
+  lastPairIdx=-1;
+  currentScreen='loading';
+  document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
+  document.getElementById('screen-loading').classList.remove('hidden');
+  setTimeout(()=>{
+    if(state?.finished) showScreen('winner');
+    else if(state?.started) showScreen('vote');
+    else showScreen('waiting');
+    if(isAdmin&&state?.started&&!state?.finished) startAdminClock();
+  },1000);
+};
+
+// ── INIT ──────────────────────────────────────────────
 showScreen('loading');
+// wait for Firebase to load, then go to correct screen
 setTimeout(()=>{
   if(currentScreen==='loading'){
     if(state?.finished) showScreen('winner');
     else if(state?.started) showScreen('vote');
     else showScreen('waiting');
   }
-  // restart admin clock if needed
-  if(isAdmin && state?.started && !state?.finished) runAdminClock();
 },2500);
 </script>
 <style>
@@ -498,61 +536,50 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 .btn:disabled{opacity:0.4;cursor:not-allowed;transform:none}
 .info-row{display:flex;gap:8px}
 .info-row .btn{margin-top:0}
-
 /* TIMER */
-.timer-wrap{border-radius:20px;padding:18px 16px 12px;text-align:center;transition:background 0.5s;margin-bottom:12px}
-.timer-ring{width:110px;height:110px;margin:0 auto 6px}
+.timer-wrap{border-radius:20px;padding:16px 16px 10px;text-align:center;transition:background 0.5s;margin-bottom:10px}
+.timer-ring{width:120px;height:120px;margin:0 auto 4px}
 .timer-ring svg{transform:rotate(-90deg)}
 .timer-ring circle{fill:none;stroke-width:9}
 .timer-bg{stroke:rgba(255,255,255,0.08)}
-.timer-fg{stroke:#f0e68c;stroke-linecap:round;transition:stroke-dashoffset 1s linear}
-.timer-text{position:relative;text-align:center;margin-top:-80px;font-size:2.2rem;font-weight:900;color:#fff;line-height:110px}
-.timer-phase{font-size:0.85rem;color:#aaa;margin-top:4px;font-weight:600;letter-spacing:1px;text-transform:uppercase}
-.match-names{text-align:center;margin-top:10px}
+.timer-fg{stroke:#f0e68c;stroke-linecap:round;transition:stroke-dashoffset 0.5s linear}
+.timer-text{position:relative;text-align:center;margin-top:-88px;font-size:2.6rem;font-weight:900;color:#fff;line-height:120px}
+.timer-phase{font-size:0.82rem;color:#aaa;margin-top:2px;letter-spacing:1px}
+.match-names{text-align:center;margin-top:8px}
 .player-name{font-size:1.1rem;font-weight:700}
-.vs{font-size:1.6rem;font-weight:900;color:#f0e68c;margin:4px 0}
-.match-sub{color:#aaa;font-size:0.8rem;margin-top:4px}
-
+.vs{font-size:1.5rem;font-weight:900;color:#f0e68c;margin:3px 0}
+.match-sub{color:#aaa;font-size:0.78rem;margin-top:3px}
 /* CRITERIA */
-.criteria-section{margin-bottom:12px}
-.criteria-title{font-size:0.82rem;color:#aaa;text-align:center;margin-bottom:8px;letter-spacing:1px}
-.crit-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
-.crit-card{background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:14px;padding:12px 8px;text-align:center}
-.crit-emoji{font-size:1.6rem;margin-bottom:2px}
-.crit-label{font-size:0.78rem;font-weight:600;color:#ddd;margin-bottom:2px}
-.crit-pts{font-size:0.7rem;color:#f0e68c;margin-bottom:4px}
-.crit-counter{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:6px}
-.crit-btn{width:30px;height:30px;border-radius:50%;border:none;font-size:1.1rem;font-weight:700;cursor:pointer;transition:all 0.15s;display:flex;align-items:center;justify-content:center}
+.crit-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:10px}
+.crit-card{background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.14);border-radius:14px;padding:11px 8px;text-align:center}
+.crit-emoji{font-size:1.5rem;margin-bottom:2px}
+.crit-label{font-size:0.76rem;font-weight:600;color:#ddd}
+.crit-pts{background:#f0e68c;color:#1a1a2e;border-radius:6px;padding:0 5px;font-size:0.68rem;font-weight:700;margin-right:3px}
+.crit-counter{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:7px}
+.crit-btn{width:32px;height:32px;border-radius:50%;border:none;font-size:1.15rem;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform 0.15s}
 .crit-btn.minus{background:rgba(231,76,60,0.25);color:#e74c3c}
 .crit-btn.plus{background:rgba(46,204,113,0.25);color:#2ecc71}
-.crit-btn:hover{transform:scale(1.15)}
-.crit-count{font-size:1.3rem;font-weight:900;min-width:28px;color:#f0e68c}
-
+.crit-btn:hover{transform:scale(1.2)}
+.crit-count{font-size:1.4rem;font-weight:900;min-width:28px;color:#f0e68c}
 /* VOTE PANEL */
 .vote-panel{background:rgba(37,99,235,0.12);border:2px solid rgba(59,130,246,0.4);border-radius:18px;padding:18px;text-align:center}
-.vote-timer-big{font-size:3.5rem;font-weight:900;color:#3b82f6;line-height:1;margin-bottom:4px}
-.vote-label{font-size:0.9rem;color:#60a5fa;font-weight:700;margin-bottom:14px;letter-spacing:1px}
-.vote-matchup{margin-bottom:14px}
-.vote-matchup .vname{font-size:1rem;font-weight:700}
-.vote-matchup .vvs{font-size:0.8rem;color:#60a5fa;margin:2px 0}
-
+.vote-timer-big{font-size:4rem;font-weight:900;line-height:1;margin-bottom:2px;transition:color 0.3s}
+.vote-label{font-size:0.88rem;color:#60a5fa;font-weight:700;margin-bottom:12px;letter-spacing:1px}
+.vote-matchup .vname{font-size:1rem;font-weight:700;margin:2px 0}
+.vote-matchup .vvs{font-size:0.78rem;color:#60a5fa;margin:2px 0}
 /* SUMMARY */
-.summary-box{background:rgba(255,255,255,0.05);border-radius:12px;padding:12px;margin-bottom:14px;text-align:right}
-.summary-title{font-size:0.85rem;font-weight:700;color:#f0e68c;margin-bottom:8px}
+.summary-box{background:rgba(255,255,255,0.05);border-radius:12px;padding:10px 12px;margin:10px 0;text-align:right}
+.summary-title{font-size:0.83rem;font-weight:700;color:#f0e68c;margin-bottom:7px}
 .summary-rows{display:flex;flex-direction:column;gap:5px}
-.summary-row{display:flex;justify-content:space-between;font-size:0.85rem;color:#ddd}
+.summary-row{display:flex;justify-content:space-between;font-size:0.84rem;color:#ddd}
 .summary-count{color:#f0e68c;font-weight:700}
-.summary-total{font-size:0.82rem;color:#aaa;margin-top:8px;border-top:1px solid rgba(255,255,255,0.1);padding-top:6px}
-
 /* STARS */
-.stars-row{display:flex;align-items:center;justify-content:center;gap:4px;margin:12px 0;direction:ltr}
-.star{font-size:0;cursor:pointer;transition:all 0.15s;position:relative;width:44px;height:44px;display:flex;align-items:center;justify-content:center}
-.star::before{content:'☆';font-size:2rem;color:rgba(255,255,255,0.25);transition:all 0.15s}
-.star.lit::before{content:'★';color:#f0e68c;text-shadow:0 0 12px rgba(240,230,140,0.8);font-size:2.2rem}
-.star:first-child::after{content:'😐';position:absolute;bottom:-18px;font-size:0.7rem}
-.star:last-child::after{content:'🔥';position:absolute;bottom:-18px;font-size:0.7rem}
-.stars-hint{display:flex;justify-content:space-between;padding:0 4px;font-size:0.7rem;color:#888;margin-bottom:8px}
-
+.stars-hint{display:flex;justify-content:space-between;padding:0 4px;font-size:0.72rem;color:#888;margin:10px 0 4px}
+.stars-row{display:flex;align-items:center;justify-content:center;gap:2px;margin-bottom:4px;direction:ltr}
+.star{width:46px;height:46px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0;transition:transform 0.15s}
+.star::before{content:'☆';font-size:2.1rem;color:rgba(255,255,255,0.2);transition:all 0.15s}
+.star.lit::before{content:'★';color:#f0e68c;text-shadow:0 0 14px rgba(240,230,140,0.9);font-size:2.3rem}
+.star:hover::before{transform:scale(1.2)}
 /* LB */
 .lb-row{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:11px;margin-bottom:7px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)}
 .lb-row.rank-1{background:rgba(255,215,0,0.12);border-color:gold}
@@ -563,18 +590,15 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 .lb-score{font-size:0.95rem;font-weight:700;color:#f0e68c}
 .lb-bar-bg{height:5px;background:rgba(255,255,255,0.1);border-radius:99px;margin-top:3px;overflow:hidden}
 .lb-bar{height:100%;border-radius:99px;background:linear-gradient(90deg,#f0e68c,#d4ac0d);transition:width 0.8s}
-/* PAIRS */
 .pair-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
 .pair-card{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:9px;padding:6px;text-align:center;font-size:0.72rem;cursor:pointer;line-height:1.5;transition:all 0.2s}
 .pair-card.done{opacity:0.35;border-color:#2ecc71}
 .pair-card.current{border-color:#f0e68c;background:rgba(240,230,140,0.12)}
-/* PODIUM */
 .podium{display:flex;align-items:flex-end;justify-content:center;gap:8px;margin:14px 0}
 .podium-place{text-align:center;border-radius:10px 10px 0 0;padding:8px 5px 7px;min-width:85px}
 .p1{background:linear-gradient(180deg,#ffd700,#b8860b);height:125px}
 .p2{background:linear-gradient(180deg,#c0c0c0,#808080);height:96px}
 .p3{background:linear-gradient(180deg,#cd7f32,#8b4513);height:74px}
-/* MISC */
 .waiting-box{text-align:center;padding:50px 20px}
 .login-box{max-width:300px;margin:60px auto;text-align:center;padding:30px 20px}
 .login-input{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,0.3);background:rgba(255,255,255,0.1);color:#fff;font-size:1.1rem;text-align:center;margin-bottom:10px;letter-spacing:4px}
@@ -605,23 +629,20 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
   <h2>🥋 קפוארה</h2>
 </nav>
 
-<!-- LOADING -->
 <div id="screen-loading" class="screen">
   <div class="waiting-box"><div style="font-size:3rem">🥋</div><div style="margin-top:12px;color:#f0e68c;font-size:1.1rem">טוען...</div></div>
 </div>
 
-<!-- WAITING -->
 <div id="screen-waiting" class="screen hidden">
   <div class="waiting-box">
     <div style="font-size:3.5rem">⏳</div>
     <div style="font-size:1.2rem;font-weight:700;color:#f0e68c;margin-top:14px">התחרות תתחיל בקרוב!</div>
     <div style="color:#aaa;font-size:0.9rem;margin-top:8px">ממתין למארגן...</div>
-    <div style="margin-top:20px;color:#555;font-size:0.8rem">ברגע שהתחרות תתחיל המסך יתעדכן אוטומטית</div>
+    <div style="margin-top:20px;color:#555;font-size:0.78rem">ברגע שהתחרות תתחיל המסך יתעדכן אוטומטית</div>
     <button class="btn btn-purple" style="margin-top:28px;width:auto;padding:10px 24px" onclick="openAdmin()">🔐 כניסת מארגן</button>
   </div>
 </div>
 
-<!-- LOGIN -->
 <div id="screen-login" class="screen hidden">
   <div class="login-box">
     <div style="font-size:2.5rem;margin-bottom:12px">🔐</div>
@@ -634,7 +655,6 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
   </div>
 </div>
 
-<!-- DRAFT -->
 <div id="screen-draft" class="screen hidden">
   <h1>🎲 סדר שחקנים</h1>
   <p class="sub">לחץ לפי סדר המספרים (1 ראשון)</p>
@@ -643,22 +663,18 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
   <button class="btn btn-gold" id="draft-confirm" disabled onclick="confirmDraft()">אשר וצא לתחרות ✅</button>
 </div>
 
-<!-- EDIT -->
 <div id="screen-edit" class="screen hidden">
   <h1>✏️ עריכת שמות</h1>
   <p class="sub">לחץ על ✏️ לעריכה</p>
   <div id="edit-list"></div>
 </div>
 
-<!-- VOTE -->
 <div id="screen-vote" class="screen hidden">
-
   <!-- MATCH PHASE -->
   <div id="vote-match-panel">
-    <!-- Timer -->
-    <div class="timer-wrap" id="timer-wrap" style="background:rgba(240,230,140,0.1)">
+    <div class="timer-wrap" id="timer-wrap">
       <div class="timer-ring">
-        <svg width="110" height="110" viewBox="0 0 100 100">
+        <svg width="120" height="120" viewBox="0 0 100 100">
           <circle class="timer-bg" cx="50" cy="50" r="42"/>
           <circle class="timer-fg" id="timer-circle" cx="50" cy="50" r="42" stroke-dasharray="264" stroke-dashoffset="0"/>
         </svg>
@@ -672,12 +688,8 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
         <div class="match-sub" id="match-num"></div>
       </div>
     </div>
-
-    <!-- Criteria -->
-    <div class="criteria-section">
-      <div class="criteria-title">📌 סמן אירועים תוך כדי המשחק</div>
-      <div class="crit-grid" id="criteria-grid"></div>
-    </div>
+    <div style="font-size:0.78rem;color:#aaa;text-align:center;margin-bottom:8px">📌 סמן אירועים תוך כדי המשחק</div>
+    <div class="crit-grid" id="criteria-grid"></div>
   </div>
 
   <!-- VOTE PHASE -->
@@ -690,11 +702,7 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
         <div class="vvs">VS</div>
         <div class="vname" id="vp-p2"></div>
       </div>
-
-      <!-- Summary -->
       <div class="summary-box" id="summary-box"></div>
-
-      <!-- Stars -->
       <div id="stars-area">
         <div class="stars-hint"><span>😐 גרוע</span><span>מדהים 🔥</span></div>
         <div class="stars-row">
@@ -704,9 +712,9 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
           <span class="star" onclick="rateStar(4)"></span>
           <span class="star" onclick="rateStar(5)"></span>
         </div>
-        <button class="btn btn-gold" id="submit-btn" disabled onclick="submitVote()" style="margin-top:16px">שלח הצבעה ✨</button>
+        <button class="btn btn-gold" id="submit-btn" disabled onclick="submitVote()" style="margin-top:14px">שלח הצבעה ✨</button>
       </div>
-      <div id="voted-msg" class="hidden" style="padding:14px">
+      <div id="voted-msg" class="hidden" style="padding:12px">
         <div style="font-size:2rem">✅</div>
         <div style="color:#2ecc71;font-weight:700;margin-top:6px">הצבעתך נרשמה!</div>
       </div>
@@ -714,21 +722,18 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
   </div>
 </div>
 
-<!-- LIVE -->
 <div id="screen-live" class="screen hidden">
   <h1>📊 טבלת ניקוד</h1>
   <p class="sub">מתעדכן בזמן אמת</p>
   <div id="leaderboard"></div>
 </div>
 
-<!-- ADMIN -->
 <div id="screen-admin" class="screen hidden">
   <h1>⚙️ ניהול תחרות</h1>
   <p class="sub">שליטה מלאה — רק למארגן</p>
   <div id="admin-content"></div>
 </div>
 
-<!-- WINNER -->
 <div id="screen-winner" class="screen hidden">
   <h1 style="text-align:center">🏆 תוצאות סופיות</h1>
   <p class="sub" style="text-align:center">מזל טוב לכל המשתתפים!</p>
@@ -738,5 +743,12 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 </div>
 
 <canvas class="confetti-canvas hidden" id="confetti-canvas"></canvas>
+
+<!-- כפתור חירום — נגיש תמיד -->
+<div id="emergency-btn" style="position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:998">
+  <button onclick="emergencyReset()" style="background:rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.2);color:#888;border-radius:20px;padding:7px 18px;font-size:0.75rem;cursor:pointer">
+    🔄 תקוע? לחץ כאן
+  </button>
+</div>
 </body>
 </html>
