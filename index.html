@@ -229,13 +229,13 @@ function startAdminClock(){
     if(!state?.started||state?.finished||state?.paused) return;
     const now=Date.now();
     if(!state.phaseEndsAt||now<state.phaseEndsAt) return;
-    clearInterval(adminClockId); // stop before writing
+    clearInterval(adminClockId);
+    adminClockId=null; // מאפס כדי שה-heartbeat יוכל להפעיל מחדש אם צריך
     if(state.phase==='match'){
       await update(ref(db,'tournament'),{
         phase:'vote',timerStart:Date.now(),
         phaseEndsAt:Date.now()+VOTE_TIME*1000
       });
-      // onValue will call startAdminClock again
     } else if(state.phase==='vote'){
       const nextIdx=(state.currentPairIdx||0)+1;
       if(nextIdx>=(state.pairs||[]).length){
@@ -252,7 +252,6 @@ function startAdminClock(){
           [`donePairs/${state.currentPairIdx||0}`]:true,
           paused:false
         });
-        // onValue will call startAdminClock again
       }
     }
   },300);
@@ -658,15 +657,24 @@ function renderVoteForPair(idx){
 
 // ── DRAFT ─────────────────────────────────────────────
 function renderDraft(){
-  orderSelection=[];
+  // אל תאפס את הבחירה אם כבר התחלנו לבחור
+  const wasSelecting = orderSelection.length > 0;
+  if(!wasSelecting) orderSelection=[];
+
   document.getElementById('draft-grid').innerHTML=playerNames.map((n,i)=>`
-    <div class="draft-card" id="dc-${i}" onclick="selectPlayer(${i})">
+    <div class="draft-card ${orderSelection.includes(i)?'selected':''}" id="dc-${i}" onclick="selectPlayer(${i})">
       <div class="draft-avatar" style="overflow:hidden;padding:0">${PLAYER_PHOTOS[n] ? `<img src="${PLAYER_PHOTOS[n]}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : n.charAt(0)}</div>
       <div class="draft-name">${n}</div>
-      <div class="draft-badge hidden" id="db-${i}"></div>
+      <div class="draft-badge ${orderSelection.includes(i)?'':'hidden'}" id="db-${i}">${orderSelection.indexOf(i)>=0?orderSelection.indexOf(i)+1:''}</div>
     </div>`).join('');
-  document.getElementById('draft-confirm').disabled=true;
-  document.getElementById('draft-status').textContent='לחץ על השחקנים לפי סדר מספרם (1 ראשון)';
+
+  const num = orderSelection.length;
+  document.getElementById('draft-confirm').disabled = num < playerNames.length;
+  document.getElementById('draft-status').textContent = num===0
+    ? 'לחץ על השחקנים לפי סדר מספרם (1 ראשון)'
+    : num < playerNames.length
+      ? `בחרת ${num} — המשך...`
+      : 'כל השחקנים נבחרו! ✅';
 }
 window.selectPlayer=function(i){
   if(orderSelection.includes(i)) return;
@@ -899,25 +907,41 @@ function showBackOverlay(){
 
 // On page show (e.g. back from cache), force full resync from Firebase
 window.addEventListener('pageshow',(e)=>{
-  if(e.persisted){
-    // Page was restored from bfcache - force Firebase re-read
-    fbLoaded=false;
-    document.getElementById('screen-loading').classList.remove('hidden');
-    setTimeout(()=>{ if(!fbLoaded){ fbLoaded=true; syncScreen(); } },5000);
-  }
+  // תמיד בצע resync כשחוזרים לאפליקציה — בין אם מcache ובין אם לא
+  fbLoaded=false;
+  document.getElementById('screen-loading').classList.remove('hidden');
+  setTimeout(()=>{ if(!fbLoaded){ fbLoaded=true; syncScreen(); } },5000);
 });
 
-// Heartbeat: every 3 seconds check if timer expired (self-healing for admin)
+// Heartbeat: every second — מנוע הלב של האפליקציה
 setInterval(()=>{
   if(!fbLoaded) return;
-  syncScreen();
-  // If admin and timer overdue — advance immediately
+
+  // הפעל מחדש את שעון האדמין אם הוא עצר
+  if(isAdmin && state?.started && !state?.finished && !state?.paused &&
+     (state?.phase==='match' || state?.phase==='vote') && !adminClockId){
+    startAdminClock();
+  }
+
+  // תיקון חירום: אם הטיימר פג — קדם מיד
   if(isAdmin && state?.started && !state?.finished && !state?.paused && state?.phaseEndsAt){
-    if(Date.now() > state.phaseEndsAt + 1500){
+    if(Date.now() > state.phaseEndsAt + 1000){
+      clearInterval(adminClockId);
+      adminClockId=null;
       advancePhaseNow();
     }
   }
-},3000);
+
+  // תיקון: אם תקועים בcountdown בלי טיימר — הפעל מחדש
+  if(state?.phase==='countdown' && !window._countdownTick){
+    const parts=(state.countdownFirst||'? נגד ?').split(' נגד ');
+    const nextIdx=state.countdownNextIdx??0;
+    _runCountdownUI(parts[0]||'?',parts[1]||'?',nextIdx);
+  }
+
+  // עדכן תצוגת טיימר מקומי
+  syncScreen();
+},1000);
 </script>
 <style>
 @keyframes spin{to{transform:rotate(360deg)}}
