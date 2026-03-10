@@ -140,7 +140,9 @@ function syncScreen(){
   clearTimeout(loadingFallback);
   document.getElementById('screen-loading')?.classList.add('hidden');
   if(!state){
-    showScreen('waiting'); return;
+    if(isAdmin) showScreen('draft');
+    else showScreen('waiting');
+    return;
   }
   if(state.finished){ showScreen('winner'); return; }
   if(state.started){
@@ -151,7 +153,8 @@ function syncScreen(){
     }
     return;
   }
-  showScreen('waiting');
+  if(isAdmin) showScreen('draft');
+  else showScreen('waiting');
 }
 
 // ── ADMIN CLOCK ───────────────────────────────────────
@@ -202,7 +205,7 @@ window.showScreen=function(id){
 
 // ── LOGIN ─────────────────────────────────────────────
 window.openAdmin=function(){
-  if(isAdmin){showScreen('admin');return;}
+  if(isAdmin){syncScreen();return;}
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
   document.getElementById('screen-login').classList.remove('hidden');
 };
@@ -211,7 +214,7 @@ window.tryAdminLogin=function(){
     isAdmin=true;
     document.getElementById('screen-login').classList.add('hidden');
     document.getElementById('main-nav').classList.remove('hidden');
-    showScreen('admin');
+    syncScreen();
     if(state?.started&&!state?.finished) startAdminClock();
   } else {
     document.getElementById('login-err').textContent='סיסמה שגויה ❌';
@@ -286,6 +289,22 @@ function renderVote(){
   },500);
 
   renderCriteria();
+
+  // ── הצגת המשחק הבא ──
+  const nextIdx = idx + 1;
+  const nextPair = (state.pairs||[])[nextIdx];
+  const showNext = !!nextPair;
+  ['next-match-banner-match','next-match-banner-vote'].forEach(id=>{
+    document.getElementById(id)?.classList.toggle('hidden', !showNext);
+  });
+  if(showNext){
+    const n1 = names[nextPair.p1]||'?';
+    const n2 = names[nextPair.p2]||'?';
+    document.getElementById('next-p1-match').textContent = n1;
+    document.getElementById('next-p2-match').textContent = n2;
+    document.getElementById('next-p1-vote').textContent = n1;
+    document.getElementById('next-p2-vote').textContent = n2;
+  }
 }
 
 function updateTimerUI(t,phase){
@@ -408,7 +427,7 @@ function renderAdmin(){
   document.getElementById('admin-content').innerHTML=`
     <div class="card">
       <div class="info-row">
-        <button class="btn btn-green" onclick="startTournament()">▶️ התחל</button>
+        <button class="btn btn-green" onclick="showCountdown()">▶️ התחל</button>
         <button class="btn btn-red" onclick="resetTournament()">🔄 איפוס מלא</button>
       </div>
       <div class="info-row" style="margin-top:8px">
@@ -752,6 +771,10 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 .paused-banner .pb-icon{font-size:2.2rem}
 .paused-banner .pb-text{font-size:1rem;font-weight:700;color:#f39c12;margin-top:4px}
 .paused-banner .pb-sub{font-size:0.8rem;color:#aaa;margin-top:2px}
+.next-match-banner{background:rgba(240,230,140,0.08);border:2px solid rgba(240,230,140,0.35);border-radius:14px;padding:12px 14px;text-align:center;margin-top:14px}
+.next-match-label{font-size:0.72rem;color:#f0e68c;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px}
+.next-match-names{font-size:1.15rem;font-weight:900;color:#fff;display:flex;align-items:center;justify-content:center;gap:8px}
+.next-match-vs{font-size:0.85rem;color:#f0e68c;font-weight:700}
 
 /* SYNC BAR */
 .sync-bar{background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.4);border-radius:12px;padding:9px 14px;display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-size:0.83rem;color:#60a5fa}
@@ -776,7 +799,7 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 .timer-text{position:relative;text-align:center;margin-top:-96px;font-size:3rem;font-weight:900;color:#fff;line-height:130px}
 .timer-phase{font-size:0.82rem;color:#aaa;margin-top:2px;letter-spacing:1px}
 .match-names{text-align:center;margin-top:10px}
-.player-name{font-size:1.15rem;font-weight:700}
+.player-name{font-size:1.5rem;font-weight:900;letter-spacing:0.5px}
 .vs{font-size:1.6rem;font-weight:900;color:#f0e68c;margin:4px 0}
 .match-sub{color:#aaa;font-size:0.78rem;margin-top:3px}
 
@@ -797,7 +820,7 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 .vote-panel{background:rgba(37,99,235,0.12);border:2px solid rgba(59,130,246,0.4);border-radius:18px;padding:18px;text-align:center}
 .vote-timer-big{font-size:5rem;font-weight:900;line-height:1;margin-bottom:2px;transition:color 0.3s}
 .vote-label{font-size:0.88rem;color:#60a5fa;font-weight:700;margin-bottom:12px;letter-spacing:1px}
-.vote-matchup .vname{font-size:1rem;font-weight:700;margin:2px 0}
+.vote-matchup .vname{font-size:1.3rem;font-weight:900;margin:2px 0}
 .vote-matchup .vvs{font-size:0.78rem;color:#60a5fa;margin:2px 0}
 
 /* SUMMARY */
@@ -809,10 +832,10 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 
 /* STARS */
 .stars-wrap{margin:10px 0}
-.stars-labels{display:grid;grid-template-columns:repeat(5,1fr);text-align:center;margin-bottom:2px}
+.stars-labels{display:grid;grid-template-columns:repeat(5,1fr);text-align:center;margin-bottom:2px;direction:ltr}
 .stars-labels span{font-size:0.68rem;color:#888}
-.stars-labels span:first-child{color:#aaa}
-.stars-labels span:last-child{color:#f0e68c}
+.stars-labels span:first-child{color:#aaa;text-align:left}
+.stars-labels span:last-child{color:#f0e68c;text-align:right}
 .stars-row{display:flex;justify-content:center;gap:2px;direction:ltr}
 .star{width:46px;height:46px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform 0.15s}
 .star::before{content:'☆';font-size:2.2rem;color:rgba(255,255,255,0.2);transition:all 0.15s}
@@ -1005,6 +1028,14 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
     </div>
     <div style="font-size:0.78rem;color:#aaa;text-align:center;margin-bottom:8px">📌 סמן אירועים תוך כדי המשחק</div>
     <div class="crit-grid" id="criteria-grid"></div>
+    <div id="next-match-banner-match" class="next-match-banner hidden">
+      <div class="next-match-label">⚡ המשחק הבא</div>
+      <div class="next-match-names">
+        <span id="next-p1-match"></span>
+        <span class="next-match-vs">VS</span>
+        <span id="next-p2-match"></span>
+      </div>
+    </div>
   </div>
 
   <!-- VOTE PHASE -->
@@ -1042,6 +1073,14 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
       <div id="voted-msg" class="hidden" style="padding:12px">
         <div style="font-size:2rem">✅</div>
         <div style="color:#2ecc71;font-weight:700;margin-top:6px">הצבעתך נרשמה!</div>
+      </div>
+      <div id="next-match-banner-vote" class="next-match-banner hidden">
+        <div class="next-match-label">⚡ המשחק הבא</div>
+        <div class="next-match-names">
+          <span id="next-p1-vote"></span>
+          <span class="next-match-vs">VS</span>
+          <span id="next-p2-vote"></span>
+        </div>
       </div>
     </div>
   </div>
