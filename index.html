@@ -165,7 +165,8 @@ function syncScreen(){
   if(state.phase==='countdown'){
     if(!document.getElementById('screen-countdown').classList.contains('hidden')) return;
     const parts=(state.countdownFirst||'? נגד ?').split(' נגד ');
-    _runCountdownUI(parts[0]||'?', parts[1]||'?');
+    const nextIdx = state.countdownNextIdx ?? 0;
+    _runCountdownUI(parts[0]||'?', parts[1]||'?', nextIdx);
     return;
   }
 
@@ -197,9 +198,14 @@ async function advancePhaseNow(){
     if(nextIdx>=(state.pairs||[]).length){
       await update(ref(db,'tournament'),{finished:true,phase:'done'});
     } else {
+      const names=state.orderedNames||playerNames;
+      const pair=(state.pairs||[])[nextIdx];
+      const p1=names[pair?.p1]||'?';
+      const p2=names[pair?.p2]||'?';
       await update(ref(db,'tournament'),{
-        phase:'match',currentPairIdx:nextIdx,
-        timerStart:Date.now(),phaseEndsAt:Date.now()+MATCH_TIME*1000,
+        phase:'countdown',
+        countdownFirst:p1+' נגד '+p2,
+        countdownNextIdx:nextIdx,
         [`donePairs/${state.currentPairIdx||0}`]:true,
         paused:false
       });
@@ -226,9 +232,14 @@ function startAdminClock(){
       if(nextIdx>=(state.pairs||[]).length){
         await update(ref(db,'tournament'),{finished:true,phase:'done'});
       } else {
+        const names=state.orderedNames||playerNames;
+        const pair=(state.pairs||[])[nextIdx];
+        const p1=names[pair?.p1]||'?';
+        const p2=names[pair?.p2]||'?';
         await update(ref(db,'tournament'),{
-          phase:'match',currentPairIdx:nextIdx,
-          timerStart:Date.now(),phaseEndsAt:Date.now()+MATCH_TIME*1000,
+          phase:'countdown',
+          countdownFirst:p1+' נגד '+p2,
+          countdownNextIdx:nextIdx,
           [`donePairs/${state.currentPairIdx||0}`]:true,
           paused:false
         });
@@ -668,12 +679,17 @@ function showCountdown(){
   _runCountdownUI(p1,p2);
 }
 
-function _runCountdownUI(p1,p2){
+function _runCountdownUI(p1,p2,nextIdx=0){
   clearInterval(window._countdownTick);
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
   document.getElementById('screen-countdown').classList.remove('hidden');
   const fm=document.getElementById('countdown-first-match');
   if(fm) fm.textContent=p1+' VS '+p2;
+  const matchLabel=document.getElementById('countdown-match-label');
+  if(matchLabel){
+    const total=(state?.pairs||[]).length;
+    matchLabel.textContent= total>0 ? `⚔️ משחק ${nextIdx+1} מתוך ${total}` : '⚔️ המשחק הבא';
+  }
   let t=10;
   const numEl=document.getElementById('countdown-num');
   const ringEl=document.getElementById('countdown-circle');
@@ -691,11 +707,11 @@ function _runCountdownUI(p1,p2){
       numEl.textContent='🥋';
       if(ringEl) ringEl.style.strokeDashoffset=264;
       clearInterval(window._countdownTick);
-      // Start tournament for real
+      // Start the match
       update(ref(db,'tournament'),{
-        started:true,phase:'match',currentPairIdx:0,
+        started:true,phase:'match',currentPairIdx:nextIdx,
         timerStart:Date.now(),phaseEndsAt:Date.now()+MATCH_TIME*1000,
-        paused:false,finished:false,countdownFirst:null
+        paused:false,finished:false,countdownFirst:null,countdownNextIdx:null
       });
       if(isAdmin) startAdminClock();
     }
@@ -1059,7 +1075,7 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
       <div id="countdown-num" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:4.5rem;font-weight:900;color:#fff;line-height:1">10</div>
     </div>
     <div style="background:rgba(240,230,140,0.1);border:2px solid rgba(240,230,140,0.4);border-radius:14px;padding:14px 20px;margin-top:4px">
-      <div style="font-size:0.72rem;color:#f0e68c;font-weight:700;letter-spacing:2px;margin-bottom:8px">🥋 המשחק הראשון</div>
+      <div id="countdown-match-label" style="font-size:0.72rem;color:#f0e68c;font-weight:700;letter-spacing:2px;margin-bottom:8px">⚔️ המשחק הבא</div>
       <div id="countdown-first-match" style="font-size:1.4rem;font-weight:900;color:#fff"></div>
     </div>
   </div>
