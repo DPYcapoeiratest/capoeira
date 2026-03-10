@@ -118,18 +118,27 @@ onValue(ref(db,'tournament'),snap=>{
   syncScreen();
 
   // Admin clock: start/restart whenever admin is present and tournament is running
-  if(isAdmin && state?.started && !state?.finished && !state?.paused){
+  if(isAdmin && state?.started && !state?.finished && !state?.paused && state?.phase==='match'){
+    clearInterval(adminClockId);
+    startAdminClock();
+  }
+  if(isAdmin && state?.started && !state?.finished && !state?.paused && state?.phase==='vote'){
     clearInterval(adminClockId);
     startAdminClock();
   }
 
-  // Self-healing: if timer expired but nobody advanced it (admin was away),
-  // any admin who loads the page will fix it immediately
+  // Self-healing: if timer expired but nobody advanced it (admin was away or refreshed)
   if(isAdmin && state?.started && !state?.finished && !state?.paused && state?.phaseEndsAt){
-    if(Date.now() > state.phaseEndsAt + 2000){
-      // Timer overdue — advance now
+    if(Date.now() > state.phaseEndsAt + 1000){
       advancePhaseNow();
     }
+  }
+
+  // Self-healing: if stuck in countdown (no _countdownTick running) — restart it
+  if(state?.phase==='countdown' && !window._countdownTick){
+    const parts=(state.countdownFirst||'? נגד ?').split(' נגד ');
+    const nextIdx = state.countdownNextIdx ?? 0;
+    _runCountdownUI(parts[0]||'?', parts[1]||'?', nextIdx);
   }
 });
 
@@ -496,7 +505,12 @@ function renderAdmin(){
       <div class="info-row">
         <button class="btn btn-green" onclick="showCountdown()">▶️ התחל</button>
         <button class="btn btn-red" onclick="resetTournament()">🔄 איפוס תחרות</button>
-        <button class="btn" style="background:linear-gradient(135deg,#6c0000,#a00);color:#fff;margin-top:6px;border:2px solid #ff4444" onclick="fullReset()">🗑️ איפוס מלא (שחקנים + תחרות)</button>
+      </div>
+      <div class="info-row" style="margin-top:6px">
+        <button class="btn" style="background:linear-gradient(135deg,#6c0000,#a00);color:#fff;border:2px solid #ff4444;width:100%" onclick="fullReset()">🗑️ איפוס מלא — מחיקת שחקנים + תחרות</button>
+      </div>
+      <div class="info-row" style="margin-top:6px">
+        <button class="btn" style="background:linear-gradient(135deg,#1a3a6c,#2563eb);color:#fff;border:2px solid #60a5fa;width:100%" onclick="emergencyFix()">🚑 תיקון חירום — התקעות</button>
       </div>
       <div class="info-row" style="margin-top:8px">
         <button class="btn ${paused?'btn-green':'btn-orange'}" onclick="togglePause()">${paused?'▶️ המשך':'⏸️ עצור הכל'}</button>
@@ -582,6 +596,16 @@ window.fullReset=async function(){
   await remove(ref(db,'tournament'));
   await remove(ref(db,'playerNames'));
   location.reload();
+};
+
+window.emergencyFix=async function(){
+  if(!state) { alert('אין מצב תחרות — נסה איפוס תחרות.'); return; }
+  clearInterval(window._countdownTick);
+  window._countdownTick = null;
+  clearInterval(adminClockId);
+  // Force advance to next logical state
+  await advancePhaseNow();
+  alert('✅ תיקון חירום בוצע!');
 };
 
 // ── NAV FOR ALL USERS (prev/next match) ───────────────
@@ -683,13 +707,20 @@ function _runCountdownUI(p1,p2,nextIdx=0){
   clearInterval(window._countdownTick);
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
   document.getElementById('screen-countdown').classList.remove('hidden');
-  const fm=document.getElementById('countdown-first-match');
-  if(fm) fm.textContent=p1+' VS '+p2;
+
+  // הצגת שמות השחקנים
+  const p1el=document.getElementById('countdown-p1');
+  const p2el=document.getElementById('countdown-p2');
+  if(p1el) p1el.textContent=p1;
+  if(p2el) p2el.textContent=p2;
+
+  // תווית מספר המשחק
   const matchLabel=document.getElementById('countdown-match-label');
   if(matchLabel){
     const total=(state?.pairs||[]).length;
     matchLabel.textContent= total>0 ? `⚔️ משחק ${nextIdx+1} מתוך ${total}` : '⚔️ המשחק הבא';
   }
+
   let t=10;
   const numEl=document.getElementById('countdown-num');
   const ringEl=document.getElementById('countdown-circle');
@@ -813,12 +844,58 @@ const loadingFallback = setTimeout(()=>{
   }
 },5000);
 
-// Prevent back button from breaking app state
+// Back button — show home overlay with reset option
 history.pushState(null,'',location.href);
 window.addEventListener('popstate',()=>{
   history.pushState(null,'',location.href);
-  syncScreen();
+  showBackOverlay();
 });
+
+function showBackOverlay(){
+  // Remove any existing overlay
+  const existing = document.getElementById('back-overlay');
+  if(existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'back-overlay';
+  overlay.style.cssText = `
+    position:fixed;inset:0;z-index:9999;
+    background:rgba(10,5,25,0.97);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:16px;padding:30px;text-align:center;
+  `;
+  overlay.innerHTML = `
+    <div style="font-size:3rem;margin-bottom:4px">🥋</div>
+    <div style="font-size:1.4rem;font-weight:900;color:#f0e68c;margin-bottom:4px">תפריט ראשי</div>
+    <div style="font-size:0.9rem;color:#aaa;margin-bottom:16px">מה תרצה לעשות?</div>
+
+    <button onclick="document.getElementById('back-overlay').remove()" style="
+      width:100%;max-width:320px;padding:14px;border-radius:14px;border:none;
+      background:linear-gradient(135deg,#2ecc71,#27ae60);color:#fff;
+      font-size:1rem;font-weight:700;cursor:pointer;
+    ">▶️ המשך תחרות</button>
+
+    <button onclick="
+      document.getElementById('back-overlay').remove();
+      if(isAdmin){showScreen('admin');}else{openAdmin();}
+    " style="
+      width:100%;max-width:320px;padding:14px;border-radius:14px;border:none;
+      background:linear-gradient(135deg,#3498db,#2980b9);color:#fff;
+      font-size:1rem;font-weight:700;cursor:pointer;
+    ">⚙️ פאנל מארגן</button>
+
+    <button onclick="fullReset()" style="
+      width:100%;max-width:320px;padding:14px;border-radius:14px;border:2px solid #e74c3c;
+      background:rgba(231,76,60,0.15);color:#e74c3c;
+      font-size:1rem;font-weight:700;cursor:pointer;
+    ">🗑️ איפוס מלא והתחלה מחדש</button>
+
+    <button onclick="document.getElementById('back-overlay').remove()" style="
+      margin-top:8px;background:none;border:none;color:#666;font-size:0.85rem;cursor:pointer;
+    ">✕ סגור</button>
+  `;
+  document.body.appendChild(overlay);
+}
 
 // On page show (e.g. back from cache), force full resync from Firebase
 window.addEventListener('pageshow',(e)=>{
@@ -1074,9 +1151,14 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
       </svg>
       <div id="countdown-num" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:4.5rem;font-weight:900;color:#fff;line-height:1">10</div>
     </div>
-    <div style="background:rgba(240,230,140,0.1);border:2px solid rgba(240,230,140,0.4);border-radius:14px;padding:14px 20px;margin-top:4px">
-      <div id="countdown-match-label" style="font-size:0.72rem;color:#f0e68c;font-weight:700;letter-spacing:2px;margin-bottom:8px">⚔️ המשחק הבא</div>
-      <div id="countdown-first-match" style="font-size:1.4rem;font-weight:900;color:#fff"></div>
+    <!-- שמות השחקנים בגדול ובולט -->
+    <div style="background:rgba(240,230,140,0.13);border:2px solid rgba(240,230,140,0.5);border-radius:18px;padding:18px 24px;margin-top:8px">
+      <div id="countdown-match-label" style="font-size:0.7rem;color:#f0e68c;font-weight:700;letter-spacing:2px;margin-bottom:12px">⚔️ המשחק הבא</div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap">
+        <div id="countdown-p1" style="font-size:1.6rem;font-weight:900;color:#fff;text-shadow:0 0 12px rgba(240,210,0,0.6)"></div>
+        <div style="font-size:1.1rem;color:#f0e68c;font-weight:900">VS</div>
+        <div id="countdown-p2" style="font-size:1.6rem;font-weight:900;color:#fff;text-shadow:0 0 12px rgba(240,210,0,0.6)"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1086,6 +1168,10 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
 
   <!-- PAUSED BANNER -->
   <div id="paused-banner" class="paused-banner hidden">
+    <div class="pb-icon">⏸️</div>
+    <div class="pb-text">התחרות מושהית</div>
+    <div class="pb-sub">המארגן עצר את הכל — ממתין להמשך</div>
+  </div>
 
   <!-- NEXT MATCH BANNER — top of screen, always visible -->
   <div id="next-match-banner" class="hidden" style="background:rgba(240,230,140,0.12);border-bottom:2px solid rgba(240,230,140,0.4);padding:10px 16px;text-align:center;margin-bottom:10px">
@@ -1095,10 +1181,6 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
       <span style="color:#f0e68c;margin:0 8px">VS</span>
       <span id="next-p2"></span>
     </div>
-  </div>
-    <div class="pb-icon">⏸️</div>
-    <div class="pb-text">התחרות מושהית</div>
-    <div class="pb-sub">המארגן עצר את הכל — ממתין להמשך</div>
   </div>
 
   <!-- VIEWER NAV — for everyone to browse matches -->
