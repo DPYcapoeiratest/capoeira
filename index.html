@@ -61,7 +61,8 @@ function generatePairs(n){
 
 // ── STATE ─────────────────────────────────────────────
 let state=null, fbLoaded=false;
-let isAdmin=false, adminClockId=null, localTick=null;
+let isAdmin=false, adminClockId=null, localTick=null, isLoginOpen=false;
+let isLoggingIn=false;
 let playerNames=[...DEFAULT_PLAYERS], orderSelection=[];
 let localCriteria={fall:0,catch:0,acro:0,combo:0};
 let lastPairIdx=-1, selectedStars=0;
@@ -150,9 +151,8 @@ function syncScreen(){
   clearTimeout(loadingFallback);
   document.getElementById('screen-loading')?.classList.add('hidden');
 
-  // Don't interrupt the login screen — user is typing their password
-  const loginScreen = document.getElementById('screen-login');
-  if(loginScreen && !loginScreen.classList.contains('hidden')) return;
+  // Don't interrupt when user is on the login screen
+  if(isLoggingIn) return;
 
   if(!state){
     if(isAdmin) showScreen('draft');
@@ -240,6 +240,7 @@ function startAdminClock(){
 
 // ── SHOW SCREEN ───────────────────────────────────────
 function showScreen(id){
+  if(isLoggingIn) return;
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
   document.getElementById('screen-'+id)?.classList.remove('hidden');
   document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
@@ -260,12 +261,14 @@ window.showScreen=function(id){
 // ── LOGIN ─────────────────────────────────────────────
 window.openAdmin=function(){
   if(isAdmin){syncScreen();return;}
+  isLoggingIn=true;
   document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
   document.getElementById('screen-login').classList.remove('hidden');
 };
 window.tryAdminLogin=function(){
   if(document.getElementById('admin-pw').value===ADMIN_PASS){
     isAdmin=true;
+    isLoggingIn=false;
     document.getElementById('screen-login').classList.add('hidden');
     document.getElementById('main-nav').classList.remove('hidden');
     syncScreen();
