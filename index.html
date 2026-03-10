@@ -116,7 +116,10 @@ onValue(ref(db,'tournament'),snap=>{
   // always sync screen from firebase — this handles refresh sync
   syncScreen();
 
-  if(isAdmin && state?.started && !state?.finished && !state?.paused) startAdminClock();
+  if(isAdmin && state?.started && !state?.finished && !state?.paused){
+    clearInterval(adminClockId);
+    startAdminClock();
+  }
 });
 
 onValue(ref(db,'playerNames'),snap=>{
@@ -134,6 +137,7 @@ function getCurrentScreen(){
 // ── SYNC SCREEN FROM FIREBASE ─────────────────────────
 function syncScreen(){
   if(!fbLoaded) return;
+  document.getElementById('screen-loading')?.classList.add('hidden');
   if(!state){
     showScreen('waiting'); return;
   }
@@ -451,8 +455,8 @@ window.togglePause=async function(){
 };
 
 window.startTournament=async function(){
-  if(!state?.pairs){alert('קודם כל בצע הגרלה!');return;}
-  await update(ref(db,'tournament'),{started:true,phase:'match',timerStart:Date.now(),phaseEndsAt:Date.now()+MATCH_TIME*1000,paused:false});
+  if(!state?.pairs||state.pairs.length===0){alert('קודם כל בצע הגרלה!');return;}
+  await update(ref(db,'tournament'),{started:true,phase:'match',currentPairIdx:0,timerStart:Date.now(),phaseEndsAt:Date.now()+MATCH_TIME*1000,paused:false,finished:false});
   startAdminClock();
 };
 window.nextMatch=async function(){
@@ -649,6 +653,17 @@ document.getElementById('screen-loading').classList.remove('hidden');
 setTimeout(()=>{
   if(!fbLoaded) syncScreen();
 },3000);
+
+// Prevent back button from breaking app state
+history.pushState(null,'',location.href);
+window.addEventListener('popstate',()=>{
+  history.pushState(null,'',location.href);
+  syncScreen();
+});
+// On page show (e.g. back from cache), force resync
+window.addEventListener('pageshow',(e)=>{
+  if(e.persisted){ syncScreen(); if(isAdmin&&state?.started&&!state?.finished&&!state?.paused){clearInterval(adminClockId);startAdminClock();} }
+});
 </script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -935,7 +950,7 @@ h1{font-size:1.3rem;color:#f0e68c;margin-bottom:4px}
       <div id="stars-area">
         <div class="stars-wrap">
           <div class="stars-labels">
-            <span>😐</span><span></span><span></span><span></span><span>🔥</span>
+            <span>גרוע</span><span></span><span></span><span></span><span>מדהים</span>
           </div>
           <div class="stars-row">
             <span class="star" onclick="rateStar(1)"></span>
